@@ -72,14 +72,14 @@ double dv_last(dbl_vector_t* vec) {
 
 void dv_insert_at(dbl_vector_t* vec, size_t pos, double new_item) {
     size_t old_size = vec->size;
-    vec->size = old_size + 1;
     size_t loc = pos;
     if (loc > old_size) loc = old_size;
-    dv_ensure_capacity(vec,old_size+1);
-    for (size_t i = loc; i < old_size + 1; i++) {
-        vec->data[loc+1] = vec->data[loc];
+    dv_ensure_capacity(vec, old_size + 1);
+    for (size_t i = vec->size; i > loc; i--) {
+        vec->data[i] = vec->data[i-1];
     }
     vec->data[loc] = new_item;
+    vec->size = old_size + 1;
 }
 
 void dv_remove_at(dbl_vector_t* vec, size_t pos) {
