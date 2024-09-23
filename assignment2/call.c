@@ -1,42 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <stdbool.h>
-#include <errno.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 
 #include "shared.h"
-
-bool validate_floor_input(const char *floor) {
-    size_t len = strlen(floor);
-
-    if (len > 4 || len < 1) {
-        return false;
-    }
-
-    char *endptr;
-    long floor_number;
-
-    if (floor[0] == 'B') {
-        errno = 0;
-        floor_number = strtol(floor + 1, &endptr, 10);
-
-        if (errno != 0 || *endptr != '\0' || floor_number < 1 || floor_number > 99) {
-            return false;
-        }
-    } else {
-        errno = 0;
-        floor_number = strtol(floor, &endptr, 10);
-
-        if (errno != 0 || *endptr != '\0' || floor_number < 1 || floor_number > 999) {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 int main(int argc, char **argv) {    
     if (argc != 3) {
@@ -86,6 +54,7 @@ int main(int argc, char **argv) {
     
     char *recvMessage = receive_msg(sockfd);
     if (strlen(recvMessage) < 1) {
+        free(recvMessage);
         error("receive_msg()");
     }
 
@@ -102,6 +71,6 @@ int main(int argc, char **argv) {
     if (close(sockfd) == -1) {
         error("close()");
     }
-
+    
     return 0;
 }

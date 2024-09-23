@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <errno.h>
+#include <stdbool.h>
 
 typedef struct {
     pthread_mutex_t mutex;
@@ -21,6 +22,35 @@ typedef struct {
     uint8_t individual_service_mode;
     uint8_t emergency_mode;
 } car_shared_mem;
+
+bool validate_floor_input(const char *floor) {
+    size_t len = strlen(floor);
+
+    if (len > 4 || len < 1) {
+        return false;
+    }
+
+    char *endptr;
+    long floor_number;
+
+    if (floor[0] == 'B') {
+        errno = 0;
+        floor_number = strtol(floor + 1, &endptr, 10);
+
+        if (errno != 0 || *endptr != '\0' || floor_number < 1 || floor_number > 99) {
+            return false;
+        }
+    } else {
+        errno = 0;
+        floor_number = strtol(floor, &endptr, 10);
+
+        if (errno != 0 || *endptr != '\0' || floor_number < 1 || floor_number > 999) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 void error(const char *msg) {
     fprintf(stderr, "%s: %s\n", msg, strerror(errno));
@@ -67,6 +97,9 @@ char *receive_msg(int fd) {
     uint32_t len = ntohl(nlen);
 
     char *buf = (char *)malloc(len + 1);
+    if (buf == NULL) {
+        error("malloc()");
+    }
     buf[len] = '\0';
     recv_looped(fd, buf, len);
     return buf;
