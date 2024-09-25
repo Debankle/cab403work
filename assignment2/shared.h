@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -52,7 +52,7 @@ bool validate_floor_input(const char *floor) {
     return true;
 }
 
-void error(const char *msg) {
+void error(const char *msg, ...) {
     fprintf(stderr, "%s: %s\n", msg, strerror(errno));
     exit(EXIT_FAILURE);
 }
@@ -103,4 +103,33 @@ char *receive_msg(int fd) {
     buf[len] = '\0';
     recv_looped(fd, buf, len);
     return buf;
+}
+
+void reset_shm(car_shared_mem *s, const char *floor)
+{
+  pthread_mutex_lock(&s->mutex);
+  size_t offset = offsetof(car_shared_mem, current_floor);
+  memset((char *)s + offset, 0, sizeof(*s) - offset);
+
+  strcpy(s->status, "Closed");
+  strcpy(s->current_floor, floor);
+  strcpy(s->destination_floor, floor);
+  pthread_mutex_unlock(&s->mutex);
+}
+
+void init_shm(car_shared_mem *s, const char *lowest_floor)
+{
+  pthread_mutexattr_t mutattr;
+  pthread_mutexattr_init(&mutattr);
+  pthread_mutexattr_setpshared(&mutattr, PTHREAD_PROCESS_SHARED);
+  pthread_mutex_init(&s->mutex, &mutattr);
+  pthread_mutexattr_destroy(&mutattr);
+
+  pthread_condattr_t condattr;
+  pthread_condattr_init(&condattr);
+  pthread_condattr_setpshared(&condattr, PTHREAD_PROCESS_SHARED);
+  pthread_cond_init(&s->cond, &condattr);
+  pthread_condattr_destroy(&condattr);
+
+  reset_shm(s, lowest_floor);
 }

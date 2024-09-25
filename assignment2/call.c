@@ -37,8 +37,7 @@ int main(int argc, char **argv) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(3000);
-    const char *ip = "127.0.0.1";
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
+    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
         error("inet_pton()");
     }
 
