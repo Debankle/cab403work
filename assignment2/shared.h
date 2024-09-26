@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 
 typedef struct {
     pthread_mutex_t mutex;

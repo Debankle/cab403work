@@ -23,11 +23,15 @@ car_shared_mem *mapSharedMemory(int fd);
 void elevator_loop(car_shared_mem *shm, int delay);
 void *controller_connection(void *arg);
 
+int delay;
+
 int main(int argc, char **argv) {
     if (argc != 5) {
         fprintf(stdout, "Usage: %s {name} {lowest floor} {highest floor} {delay}\n", argv[0]);
         exit(EXIT_FAILURE);
     }
+
+    delay = atoi(argv[4]);
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -43,6 +47,7 @@ int main(int argc, char **argv) {
     strncpy(conn_args.name, argv[1], sizeof(conn_args.name) - 1);
     strncpy(conn_args.lowest_floor, argv[2], sizeof(conn_args.lowest_floor) - 1);
     strncpy(conn_args.highest_floor, argv[3], sizeof(conn_args.highest_floor) - 1);
+    conn_args.delay = delay;
 
     pthread_t connection_thread;
     if (pthread_create(&connection_thread, NULL, controller_connection, &conn_args) != 0) {
@@ -51,7 +56,6 @@ int main(int argc, char **argv) {
 
     elevator_loop(car_shm_ptr, atoi(argv[4]));
 
-    
 
 
 
@@ -95,9 +99,10 @@ car_shared_mem *mapSharedMemory(int fd) {
 }
 
 void elevator_loop(car_shared_mem *shm, int delay) {
-
+    
 }
 
+// Modify to handle incoming connections, send only if delay time is long enough, etc
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *)args;
     car_shared_mem *shm = conn_args->shared_mem_ptr;
@@ -141,4 +146,12 @@ void *controller_connection(void *args) {
 
         usleep(conn_args->delay * 1000);
     }
+
+    if (shutdown(sockfd, SHUT_RDWR) == -1) {
+        close(sockfd);
+        error("shutdown()");
+    }
+    close(sockfd);
+
+    return NULL;
 }

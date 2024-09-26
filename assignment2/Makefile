@@ -4,8 +4,8 @@ HEADERS = $(wildcard *.h)
 COMPONENTS = $(C_SOURCES:.c=)
 
 CC = gcc
-CFLAGS_DEBUG = -Wextra -Werror -g -DDEBUG -MMD -MP
-CFLAGS = -Wall -pthread
+CFLAGS_DEBUG = -Wall -Wextra -Werror -g -DDEBUG -MMD -MP
+CFLAGS = -pthread
 
 .SUFFIXES:
 
