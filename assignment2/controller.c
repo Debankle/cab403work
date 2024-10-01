@@ -66,7 +66,15 @@ int main(int argc, char **argv) {
 }
 
 void *handle_connection(void *args) {
+    pthread_detach(pthread_self());
     connection_args_t *conn = (connection_args_t *)args;
+
+    char* initial_message = receive_msg(conn->fd);
+    if (strncmp(initial_message, "CALL", 4) == 0) {
+        // handle call connection
+    } else {
+        // handle car connection
+    }
 
     return NULL;
 }
