@@ -22,6 +22,7 @@ int createSharedMemoryObject(char *name);
 car_shared_mem *mapSharedMemory(int fd);
 void elevator_loop(car_shared_mem *shm, int delay);
 void *controller_connection(void *arg);
+void send_status(car_shared_mem *shm, int sockfd);
 
 int delay;
 
@@ -99,7 +100,14 @@ car_shared_mem *mapSharedMemory(int fd) {
 }
 
 void elevator_loop(car_shared_mem *shm, int delay) {
-    
+    while (1) {
+        pthread_mutex_lock(&shm->mutex);
+        
+        pthread_cond_wait(&shm->cond, &shm->mutex);
+
+        pthread_mutex_unlock(&shm->mutex);
+        usleep(delay * 1000);
+    }
 }
 
 // Modify to handle incoming connections, send only if delay time is long enough, etc
@@ -129,7 +137,6 @@ void *controller_connection(void *args) {
             usleep(conn_args->delay * 1000);
             continue;
         }
-
         break;
     }
 
@@ -138,11 +145,7 @@ void *controller_connection(void *args) {
     send_message(sockfd, initialMessage);
 
     while (1) {
-        pthread_mutex_lock(&shm->mutex);
-        char status_message[256];
-        snprintf(status_message, sizeof(status_message), "STATUS %s %s %s", shm->status, shm->current_floor, shm->destination_floor);
-        pthread_mutex_unlock(&shm->mutex);
-        send_message(sockfd, status_message);
+        send_status(shm, sockfd);
 
         usleep(conn_args->delay * 1000);
     }
@@ -154,4 +157,12 @@ void *controller_connection(void *args) {
     close(sockfd);
 
     return NULL;
+}
+
+void send_status(car_shared_mem *shm, int sockfd) {
+    char status_message[256];
+    pthread_mutex_lock(&shm->mutex);
+    snprintf(status_message, sizeof(status_message), "STATUS %s %s %s", shm->status, shm->current_floor, shm->destination_floor);
+    pthread_mutex_unlock(&shm->mutex);
+    send_message(sockfd, status_message);
 }

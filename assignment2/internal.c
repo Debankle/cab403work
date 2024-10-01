@@ -30,38 +30,37 @@ int main(int argc, char **argv) {
     if (car_shm_ptr == MAP_FAILED) {
         close(shm_fd);
         error("mmap()");
-        exit(EXIT_FAILURE);
     }
 
     if (strcmp(argv[2], "open") == 0) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         car_shm_ptr->open_button = 1;
-        pthread_cond_signal(&car_shm_ptr->cond);
+        pthread_cond_broadcast(&car_shm_ptr->cond);
         pthread_mutex_unlock(&car_shm_ptr->mutex);
 
     } else if (strcmp(argv[2], "close") == 0) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         car_shm_ptr->close_button = 1;
-        pthread_cond_signal(&car_shm_ptr->cond);
+        pthread_cond_broadcast(&car_shm_ptr->cond);
         pthread_mutex_unlock(&car_shm_ptr->mutex);
 
     } else if (strcmp(argv[2], "stop") == 0) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         car_shm_ptr->emergency_stop = 1;
-        pthread_cond_signal(&car_shm_ptr->cond);
+        pthread_cond_broadcast(&car_shm_ptr->cond);
         pthread_mutex_unlock(&car_shm_ptr->mutex);
 
     } else if (strcmp(argv[2], "service_on") == 0) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         car_shm_ptr->individual_service_mode = 1;
         car_shm_ptr->emergency_mode = 0;
-        pthread_cond_signal(&car_shm_ptr->cond);
+        pthread_cond_broadcast(&car_shm_ptr->cond);
         pthread_mutex_unlock(&car_shm_ptr->mutex);
 
     } else if (strcmp(argv[2], "service_off") == 0) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         car_shm_ptr->individual_service_mode = 0;
-        pthread_cond_signal(&car_shm_ptr->cond);
+        pthread_cond_broadcast(&car_shm_ptr->cond);
         pthread_mutex_unlock(&car_shm_ptr->mutex);
 
     } else if (strcmp(argv[2], "up") == 0) {
@@ -69,7 +68,7 @@ int main(int argc, char **argv) {
         if (car_shm_ptr->individual_service_mode) {
             if (strcmp(car_shm_ptr->status, "Closed") == 0) {
                 strcpy(car_shm_ptr->destination_floor, floor_above(car_shm_ptr->current_floor));
-                pthread_cond_signal(&car_shm_ptr->cond);
+                pthread_cond_broadcast(&car_shm_ptr->cond);
             } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
                 fprintf(stdout, "Operation not allowed while elevator is moving.\n");
             } else {
@@ -85,7 +84,7 @@ int main(int argc, char **argv) {
         if (car_shm_ptr->individual_service_mode) {
             if (strcmp(car_shm_ptr->status, "Closed") == 0) {
                 strcpy(car_shm_ptr->destination_floor, floor_below(car_shm_ptr->current_floor));
-                pthread_cond_signal(&car_shm_ptr->cond);
+                pthread_cond_broadcast(&car_shm_ptr->cond);
             } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
                 fprintf(stdout, "Operation not allowed while elevator is moving.\n");
             } else {
