@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
 
     int shm_fd = shm_open(name, O_RDWR, 0666);
     if (shm_fd == -1) {
-        fprintf(stdout, "Unable to access car %s\n", argv[1]);
+        fprintf(stdout, "Unable to access car %s.\n", argv[1]);
         exit(EXIT_FAILURE);
     }
 
