@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <poll.h>
+#include <time.h>
 
 #include "shared.h"
 
@@ -25,6 +28,7 @@ void *controller_connection(void *arg);
 void send_status(int sockfd);
 void sigint_handler(int s);
 bool should_wait();
+void notify_status_change(int pipe_write_fd);
 
 static int delay;
 
@@ -67,11 +71,7 @@ int main(int argc, char **argv) {
         error("pthread_create()");
     }
 
-    elevator_loop(conn_args.pipe_write_fd);
-
-
-
-
+    elevator_loop(pipefd[1]);
 
     pthread_join(connection_thread, NULL);
 
@@ -115,57 +115,105 @@ car_shared_mem *mapSharedMemory(int fd) {
     return shared_mem_ptr;
 }
 
+// don't need to worry about  timings
+// just do a fresh loop and check the variables each time
+// if they change during it actions are not interupted unless emergency
+// we can worry about emergency happening later
 void elevator_loop(int pipe_write_fd) {
-    // char buf = '1';
-    // notify changes to controller with: write(pipe_write_fd, &buf, 1);
-    (void)pipe_write_fd;
+    struct timespec start_time, end_time;
+    long elapsed_time;
+
     while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+
         pthread_mutex_lock(&car_shm_ptr->mutex);
 
         while (should_wait()) {
+            // check that nothing needs to be done i.e. specific state of doors shut, current_floor is destination_floor, no buttons pushed or whatever
             pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
         }
-        
-        if (car_shm_ptr->individual_service_mode) {
+
+        if (car_shm_ptr->emergency_mode == 1) {
+            // handle open close buttons
+            notify_status_change(pipe_write_fd);
+            pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
             pthread_mutex_unlock(&car_shm_ptr->mutex);
-            usleep(delay * 1000);
             continue;
         }
+        
+        if (car_shm_ptr->individual_service_mode == 1) {
+            // handle individual service mode
 
-        if (car_shm_ptr->open_button == 1) {
-            if (strcmp(car_shm_ptr->status, "Open") == 0) {
+            pthread_mutex_unlock(&car_shm_ptr->mutex);
+        } else {
+            // handle normal mode
+            if (car_shm_ptr->open_button == 1) {
+                if (strcmp(car_shm_ptr->status, "Open") == 0) {
 
-            } else if (strcmp(car_shm_ptr->status, "Closing") == 0 || strcmp(car_shm_ptr->status, "Closed") == 0) {
-                strcpy(car_shm_ptr->status, "Openin");
+                } else if (strcmp(car_shm_ptr->status, "Closing") == 0 || strcmp(car_shm_ptr->status, "Closed") == 0) {
+                    strcpy(car_shm_ptr->status, "Opening");
+                    notify_status_change(pipe_write_fd);
+                }
+                car_shm_ptr->open_button = 0;
+                pthread_cond_broadcast(&car_shm_ptr->cond);
             }
-            car_shm_ptr->open_button = 0;
-            pthread_cond_broadcast(&car_shm_ptr->cond);
         }
 
         pthread_mutex_unlock(&car_shm_ptr->mutex);
-        usleep(delay * 1000);
+
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_nsec - start_time.tv_nsec) / 1000L;
+        long remaining_time = (delay * 1000L) - elapsed_time;
+        if (remaining_time > 0) {
+            usleep(remaining_time);
+        }
     }
 }
 
-// Modify to handle incoming connections, send only if delay time is long enough, etc
+// TODO: handle controller disconnect, cleanup reloop etc
+// idk if thats necessary but w/e
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *)args;
     int sockfd = -1;
-    struct sockaddr_in controller_addr;
+
+    struct timeval timer;
+    timer.tv_sec = 0;
+    timer.tv_usec = delay * 1000;
 
     while (1) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         int individual_service_mode = car_shm_ptr->individual_service_mode;
-        pthread_mutex_unlock(&car_shm_ptr->mutex);
+        int emergency_mode = car_shm_ptr->emergency_mode;
+\
+        if (emergency_mode == 1) {
+            printf("in emergency mode why...\n");
+            if (sockfd != -1) {
+                send_message(sockfd, "EMERGENCY");
+                close(sockfd);
+                sockfd = -1;
+            }
+            while (car_shm_ptr->emergency_mode == 1) {
+                pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
+            }
+            pthread_mutex_unlock(&car_shm_ptr->mutex);
+            continue;
+        }
 
         if (individual_service_mode) {
+            printf("in individual mode why...\n");
             if (sockfd != -1) {
                 send_message(sockfd, "INDIVIDUAL_SERVICE");
                 close(sockfd);
                 sockfd = -1;
             }
+            while (car_shm_ptr->individual_service_mode == 1) {
+                pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
+            }
+            pthread_mutex_unlock(&car_shm_ptr->mutex);
             continue;
         }
+
+        pthread_mutex_unlock(&car_shm_ptr->mutex);
 
         if (sockfd == -1) {
             sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -175,18 +223,22 @@ void *controller_connection(void *args) {
                 continue;
             }
 
+            struct sockaddr_in controller_addr;
+
             memset(&controller_addr, 0, sizeof(controller_addr));
             controller_addr.sin_family = AF_INET;
             controller_addr.sin_port = htons(3000);
             if (inet_pton(AF_INET, "127.0.0.1", &controller_addr.sin_addr) != 1) {
                 close(sockfd);
                 perror("inet_pton()");
+                sockfd = -1;
                 usleep(delay * 1000);
                 continue;
             }
 
-            if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) < 0) {
+            if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) != 0) {
                 close(sockfd);
+                sockfd = -1;
                 usleep(delay * 1000);
                 continue;
             }
@@ -195,13 +247,68 @@ void *controller_connection(void *args) {
             snprintf(initialMessage, sizeof(initialMessage), "CAR %s %s %s", conn_args->name, conn_args->lowest_floor, conn_args->highest_floor);
             send_message(sockfd, initialMessage);
             send_status(sockfd);
-            continue;
+            
+            timer.tv_sec = 0;
+            timer.tv_usec = delay * 1000;
         }
 
-        send_status(sockfd);
-        printf("updating status\n");
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(conn_args->pipe_read_fd, &readfds);
+        int maxfd = conn_args->pipe_read_fd;
+        if (sockfd != -1) {
+            FD_SET(sockfd, &readfds);
+            if (sockfd > maxfd) {
+                maxfd = sockfd;
+            }
+        }
 
-        usleep(delay * 1000);
+        int res = select(maxfd + 1, &readfds, NULL, NULL, &timer);
+        if (res == -1) {
+            perror("select()");
+            break;
+        }
+        
+        if (FD_ISSET(sockfd, &readfds)) {
+            char *message = receive_msg(sockfd);
+            if (message == NULL) {
+                close(sockfd);
+                sockfd = -1;
+                continue;
+            }
+            if (strncmp(message, "FLOOR ", 6) == 0) {
+                pthread_mutex_lock(&car_shm_ptr->mutex);
+                int individual_service_mode = car_shm_ptr->individual_service_mode;
+                pthread_mutex_unlock(&car_shm_ptr->mutex); 
+            
+                if (individual_service_mode == 0) {
+                    char new_destination[4];
+                    sscanf(message+6, "%s", new_destination);
+                    pthread_mutex_lock(&car_shm_ptr->mutex);
+                    strcpy(car_shm_ptr->destination_floor, new_destination);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                    pthread_mutex_unlock(&car_shm_ptr->mutex);
+                    send_status(sockfd);
+                    timer.tv_sec = 0;
+                    timer.tv_usec = delay * 1000;
+                }
+            }
+            free(message);
+        }
+
+        if (FD_ISSET(conn_args->pipe_read_fd, &readfds)) {
+                char buf[128];
+                read(conn_args->pipe_read_fd, buf, sizeof(buf));
+                send_status(sockfd);
+                timer.tv_sec = 0;
+                timer.tv_usec = delay * 1000;
+        }
+        
+        if (res == 0) {
+            send_status(sockfd);
+            timer.tv_sec = 0;
+            timer.tv_usec = delay * 1000;
+        }
     }
 
     if (shutdown(sockfd, SHUT_RDWR) == -1) {
@@ -209,6 +316,7 @@ void *controller_connection(void *args) {
         error("shutdown()");
     }
     close(sockfd);
+    close(conn_args->pipe_read_fd);
 
     return NULL;
 }
@@ -240,5 +348,11 @@ void sigint_handler(int s) {
 bool should_wait() {
     // check if the system is in a state that shouldn't be doing anything, thus can avoid looping and holding mutex
     // updates on broadcast so its fine to hang on this
+    // DOES NOT NEED MUTEX LOCK ALREADY IN ONE!!!!
     return false;
+}
+
+void notify_status_change(int pipe_write_fd) {
+    char buf = '1';
+    write(pipe_write_fd, &buf, 1);
 }

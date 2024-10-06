@@ -78,6 +78,7 @@ void send_message(int fd, const char *buf) {
     send_looped(fd, buf, strlen(buf));
 }
 
+// TODO: add handle received == 0 for disconnect
 void recv_looped(int fd, void *buf, size_t sz) {
     char *ptr = (char *)buf;
     size_t remain = sz;
