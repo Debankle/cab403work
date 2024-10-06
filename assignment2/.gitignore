@@ -1,6 +1,6 @@
-test
-asgn2-testers.zip
-
-*.o
-*.d
 *
+
+!*.c
+!*.h
+!Makefile
+!test.py
