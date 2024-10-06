@@ -18,7 +18,7 @@ typedef struct connection_args {
 
 void *handle_connection(void *arg);
 
-int main(int argc, char **argv) {
+int main(void) {
 
     int sockfd, new_sock;
     struct sockaddr_in controlleraddr, conaddr;
