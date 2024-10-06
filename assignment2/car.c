@@ -11,20 +11,26 @@
 #include "shared.h"
 
 typedef struct {
-    car_shared_mem *shared_mem_ptr;
-    int delay;
     char name[100];
     char lowest_floor[4];
     char highest_floor[4];
+    int pipe_read_fd;
+    int pipe_write_fd;
 } controller_con_args_t;
 
 int createSharedMemoryObject(char *name);
 car_shared_mem *mapSharedMemory(int fd);
-void elevator_loop(car_shared_mem *shm, int delay);
+void elevator_loop(int pipe_write_fd);
 void *controller_connection(void *arg);
-void send_status(car_shared_mem *shm, int sockfd);
+void send_status(int sockfd);
+void sigint_handler(int s);
+bool should_wait();
 
-int delay;
+static int delay;
+
+static int car_shm_fd;
+static car_shared_mem *car_shm_ptr;
+static char shm_name[256];
 
 int main(int argc, char **argv) {
     if (argc != 5) {
@@ -32,30 +38,36 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    delay = atoi(argv[4]);
-
+    signal(SIGINT, sigint_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    size_t shm_name_size = strlen(argv[1]) + 5;
-    char name[shm_name_size];
-    snprintf(name, shm_name_size, "/car%s", argv[1]);
+    delay = atoi(argv[4]);
 
-    int car_shm_fd = createSharedMemoryObject(name);
-    car_shared_mem *car_shm_ptr = mapSharedMemory(car_shm_fd);
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        error("pipe()");
+    }
+
+    size_t shm_name_size = strlen(argv[1]) + 5;
+    snprintf(shm_name, shm_name_size, "/car%s", argv[1]);
+
+    car_shm_fd = createSharedMemoryObject(shm_name);
+    car_shm_ptr = mapSharedMemory(car_shm_fd);
     init_shm(car_shm_ptr, argv[2]);
 
-    controller_con_args_t conn_args = { .shared_mem_ptr = car_shm_ptr };
+    controller_con_args_t conn_args;
     strncpy(conn_args.name, argv[1], sizeof(conn_args.name) - 1);
     strncpy(conn_args.lowest_floor, argv[2], sizeof(conn_args.lowest_floor) - 1);
     strncpy(conn_args.highest_floor, argv[3], sizeof(conn_args.highest_floor) - 1);
-    conn_args.delay = delay;
+    conn_args.pipe_read_fd = pipefd[0];
+    conn_args.pipe_write_fd = pipefd[1];
 
     pthread_t connection_thread;
     if (pthread_create(&connection_thread, NULL, controller_connection, &conn_args) != 0) {
         error("pthread_create()");
     }
 
-    elevator_loop(car_shm_ptr, atoi(argv[4]));
+    elevator_loop(conn_args.pipe_write_fd);
 
 
 
@@ -70,6 +82,10 @@ int main(int argc, char **argv) {
     
     if (close(car_shm_fd) == -1) {
         error("close()");
+    }
+
+    if(shm_unlink(shm_name) == -1) {
+        error("shm_unlink()");
     }
 
     return 0;
@@ -99,13 +115,34 @@ car_shared_mem *mapSharedMemory(int fd) {
     return shared_mem_ptr;
 }
 
-void elevator_loop(car_shared_mem *shm, int delay) {
+void elevator_loop(int pipe_write_fd) {
+    // char buf = '1';
+    // notify changes to controller with: write(pipe_write_fd, &buf, 1);
+    (void)pipe_write_fd;
     while (1) {
-        pthread_mutex_lock(&shm->mutex);
-        
-        pthread_cond_wait(&shm->cond, &shm->mutex);
+        pthread_mutex_lock(&car_shm_ptr->mutex);
 
-        pthread_mutex_unlock(&shm->mutex);
+        while (should_wait()) {
+            pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
+        }
+        
+        if (car_shm_ptr->individual_service_mode) {
+            pthread_mutex_unlock(&car_shm_ptr->mutex);
+            usleep(delay * 1000);
+            continue;
+        }
+
+        if (car_shm_ptr->open_button == 1) {
+            if (strcmp(car_shm_ptr->status, "Open") == 0) {
+
+            } else if (strcmp(car_shm_ptr->status, "Closing") == 0 || strcmp(car_shm_ptr->status, "Closed") == 0) {
+                strcpy(car_shm_ptr->status, "Openin");
+            }
+            car_shm_ptr->open_button = 0;
+            pthread_cond_broadcast(&car_shm_ptr->cond);
+        }
+
+        pthread_mutex_unlock(&car_shm_ptr->mutex);
         usleep(delay * 1000);
     }
 }
@@ -113,41 +150,58 @@ void elevator_loop(car_shared_mem *shm, int delay) {
 // Modify to handle incoming connections, send only if delay time is long enough, etc
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *)args;
-    car_shared_mem *shm = conn_args->shared_mem_ptr;
-
-    int sockfd;
+    int sockfd = -1;
     struct sockaddr_in controller_addr;
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        error("socket()");
-    }
-
-    memset(&controller_addr, 0, sizeof(controller_addr));
-    controller_addr.sin_family = AF_INET;
-    controller_addr.sin_port = htons(3000);
-    if (inet_pton(AF_INET, "127.0.0.1", &controller_addr.sin_addr) != 1) {
-        close(sockfd);
-        error("inet_pton()");
-    }
-
     while (1) {
-        if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) < 0) {
-            close(sockfd);
-            usleep(conn_args->delay * 1000);
+        pthread_mutex_lock(&car_shm_ptr->mutex);
+        int individual_service_mode = car_shm_ptr->individual_service_mode;
+        pthread_mutex_unlock(&car_shm_ptr->mutex);
+
+        if (individual_service_mode) {
+            if (sockfd != -1) {
+                send_message(sockfd, "INDIVIDUAL_SERVICE");
+                close(sockfd);
+                sockfd = -1;
+            }
             continue;
         }
-        break;
-    }
 
-    char initialMessage[256];
-    snprintf(initialMessage, sizeof(initialMessage), "CAR %s %s %s", conn_args->name, conn_args->lowest_floor, conn_args->highest_floor);
-    send_message(sockfd, initialMessage);
+        if (sockfd == -1) {
+            sockfd = socket(AF_INET, SOCK_STREAM, 0);
+            if (sockfd == -1) {
+                perror("socket()");
+                usleep(delay * 1000);
+                continue;
+            }
 
-    while (1) {
-        send_status(shm, sockfd);
+            memset(&controller_addr, 0, sizeof(controller_addr));
+            controller_addr.sin_family = AF_INET;
+            controller_addr.sin_port = htons(3000);
+            if (inet_pton(AF_INET, "127.0.0.1", &controller_addr.sin_addr) != 1) {
+                close(sockfd);
+                perror("inet_pton()");
+                usleep(delay * 1000);
+                continue;
+            }
 
-        usleep(conn_args->delay * 1000);
+            if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) < 0) {
+                close(sockfd);
+                usleep(delay * 1000);
+                continue;
+            }
+
+            char initialMessage[256];
+            snprintf(initialMessage, sizeof(initialMessage), "CAR %s %s %s", conn_args->name, conn_args->lowest_floor, conn_args->highest_floor);
+            send_message(sockfd, initialMessage);
+            send_status(sockfd);
+            continue;
+        }
+
+        send_status(sockfd);
+        printf("updating status\n");
+
+        usleep(delay * 1000);
     }
 
     if (shutdown(sockfd, SHUT_RDWR) == -1) {
@@ -159,10 +213,32 @@ void *controller_connection(void *args) {
     return NULL;
 }
 
-void send_status(car_shared_mem *shm, int sockfd) {
+void send_status(int sockfd) {
     char status_message[256];
-    pthread_mutex_lock(&shm->mutex);
-    snprintf(status_message, sizeof(status_message), "STATUS %s %s %s", shm->status, shm->current_floor, shm->destination_floor);
-    pthread_mutex_unlock(&shm->mutex);
+    pthread_mutex_lock(&car_shm_ptr->mutex);
+    snprintf(status_message, sizeof(status_message), "STATUS %s %s %s", car_shm_ptr->status, car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+    pthread_mutex_unlock(&car_shm_ptr->mutex);
     send_message(sockfd, status_message);
+}
+
+void sigint_handler(int s) {
+    if (munmap(car_shm_ptr, sizeof(car_shared_mem)) == -1) {
+        error("munmap()");
+    }
+
+    if (close(car_shm_fd) == -1) {
+        error("close()");
+    }
+
+    if (shm_unlink(shm_name) == -1) {
+        error("shm_unlink()");
+    }
+
+    exit(s);
+}
+
+bool should_wait() {
+    // check if the system is in a state that shouldn't be doing anything, thus can avoid looping and holding mutex
+    // updates on broadcast so its fine to hang on this
+    return false;
 }
