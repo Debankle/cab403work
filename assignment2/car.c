@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <poll.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "shared.h"
 
@@ -27,8 +28,11 @@ void elevator_loop(int pipe_write_fd);
 void *controller_connection(void *arg);
 void send_status(int sockfd);
 void sigint_handler(int s);
-bool should_wait();
 void notify_status_change(int pipe_write_fd);
+void calculate_absolute_timeout(struct timespec *ts);
+int floor_str_to_int(const char *floor_str);
+void floor_int_to_str(int floor_num, char *floor_str);
+void move_floor(char *current_floor, const char *destination_floor);
 
 static int delay;
 
@@ -115,58 +119,90 @@ car_shared_mem *mapSharedMemory(int fd) {
     return shared_mem_ptr;
 }
 
-// don't need to worry about  timings
-// just do a fresh loop and check the variables each time
-// if they change during it actions are not interupted unless emergency
-// we can worry about emergency happening later
 void elevator_loop(int pipe_write_fd) {
-    struct timespec start_time, end_time;
-    long elapsed_time;
+    struct timespec timeout;
+    int ret;
+    calculate_absolute_timeout(&timeout);
 
     while (1) {
-        clock_gettime(CLOCK_MONOTONIC, &start_time);
-
         pthread_mutex_lock(&car_shm_ptr->mutex);
 
-        while (should_wait()) {
-            // check that nothing needs to be done i.e. specific state of doors shut, current_floor is destination_floor, no buttons pushed or whatever
-            pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
-        }
+        ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
+
+        // if ref == ETIMEDOUT it means we reached delay
+        // handle things as if the full delay time passed
+        // otherwise its an interrupt and we need to check if its valid
 
         if (car_shm_ptr->emergency_mode == 1) {
-            // handle open close buttons
-            notify_status_change(pipe_write_fd);
-            pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
-            pthread_mutex_unlock(&car_shm_ptr->mutex);
-            continue;
-        }
-        
-        if (car_shm_ptr->individual_service_mode == 1) {
-            // handle individual service mode
-
-            pthread_mutex_unlock(&car_shm_ptr->mutex);
-        } else {
-            // handle normal mode
-            if (car_shm_ptr->open_button == 1) {
-                if (strcmp(car_shm_ptr->status, "Open") == 0) {
-
-                } else if (strcmp(car_shm_ptr->status, "Closing") == 0 || strcmp(car_shm_ptr->status, "Closed") == 0) {
+            if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                if (car_shm_ptr->open_button == 1) {
+                    car_shm_ptr->open_button = 0;
                     strcpy(car_shm_ptr->status, "Opening");
+                    calculate_absolute_timeout(&timeout);
                     notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
                 }
-                car_shm_ptr->open_button = 0;
+            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                if (car_shm_ptr->close_button == 1) {
+                    car_shm_ptr->close_button = 0;
+                    strcpy(car_shm_ptr->status, "Closing");
+                    calculate_absolute_timeout(&timeout);
+                    notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                }
+            } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                strcpy(car_shm_ptr->status, "Open");
+                calculate_absolute_timeout(&timeout);
+                notify_status_change(pipe_write_fd);
                 pthread_cond_broadcast(&car_shm_ptr->cond);
+            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                strcpy(car_shm_ptr->status, "Closed");
+                calculate_absolute_timeout(&timeout);
+                notify_status_change(pipe_write_fd);
+                pthread_cond_broadcast(&car_shm_ptr->cond);
+            }
+
+
+        } else if (car_shm_ptr->individual_service_mode == 1) {
+            if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                strcpy(car_shm_ptr->status, "Open");
+                pthread_cond_broadcast(&car_shm_ptr->cond);
+            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                strcpy(car_shm_ptr->status, "Closed");
+                pthread_cond_broadcast(&car_shm_ptr->cond);
+            } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                strcpy(car_shm_ptr->status, "Closed");
+                pthread_cond_broadcast(&car_shm_ptr->cond);
+            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                
+            } else if(strcmp(car_shm_ptr->status, "Closed") == 0) {
+
+            }
+
+            
+        } else {
+            if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                strcpy(car_shm_ptr->status, "Open");
+                if (car_shm_ptr->open_button == 1) {
+                    car_shm_ptr->open_button = 0;
+                }
+            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                if (car_shm_ptr->open_button == 1) {
+                    strcpy(car_shm_ptr->status, "Opening");
+                    car_shm_ptr->open_button = 0;
+                } else {
+                    strcpy(car_shm_ptr->status, "Closed");
+                }
+            } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+
+            } else if(strcmp(car_shm_ptr->status, "Closed") == 0) {
+                
             }
         }
 
         pthread_mutex_unlock(&car_shm_ptr->mutex);
-
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
-        elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_nsec - start_time.tv_nsec) / 1000L;
-        long remaining_time = (delay * 1000L) - elapsed_time;
-        if (remaining_time > 0) {
-            usleep(remaining_time);
-        }
     }
 }
 
@@ -184,7 +220,7 @@ void *controller_connection(void *args) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
         int individual_service_mode = car_shm_ptr->individual_service_mode;
         int emergency_mode = car_shm_ptr->emergency_mode;
-\
+
         if (emergency_mode == 1) {
             printf("in emergency mode why...\n");
             if (sockfd != -1) {
@@ -200,7 +236,6 @@ void *controller_connection(void *args) {
         }
 
         if (individual_service_mode) {
-            printf("in individual mode why...\n");
             if (sockfd != -1) {
                 send_message(sockfd, "INDIVIDUAL_SERVICE");
                 close(sockfd);
@@ -345,14 +380,48 @@ void sigint_handler(int s) {
     exit(s);
 }
 
-bool should_wait() {
-    // check if the system is in a state that shouldn't be doing anything, thus can avoid looping and holding mutex
-    // updates on broadcast so its fine to hang on this
-    // DOES NOT NEED MUTEX LOCK ALREADY IN ONE!!!!
-    return false;
-}
-
 void notify_status_change(int pipe_write_fd) {
     char buf = '1';
     write(pipe_write_fd, &buf, 1);
+}
+
+void calculate_absolute_timeout(struct timespec *ts) {
+    clock_gettime(CLOCK_REALTIME, ts);
+
+    ts->tv_sec += delay / 1000;
+    ts->tv_nsec += (delay % 1000) * 1000000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec += 1;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+void move_floor(char *current_floor, const char *destination_floor) {
+    int current = floor_str_to_int(current_floor);
+    int destination = floor_str_to_int(destination_floor);
+    if (current < destination) {
+        current += 1;
+    } else if (current > destination) {
+        current -= 1;
+    } else {
+        return;
+    }
+
+    floor_int_to_str(current, current_floor);
+}
+
+int floor_str_to_int(const char *floor_str) {
+    if (floor_str[0] == 'B') {
+        return -atoi(floor_str+1);
+    } else {
+        return atoi(floor_str);
+    }
+}
+
+void floor_int_to_str(int floor_num, char *floor_str) {
+    if (floor_num < 0) {
+        snprintf(floor_str, 4, "B%d", -floor_num);
+    } else {
+        snprintf(floor_str, 4, "%d", floor_num);
+    }
 }
