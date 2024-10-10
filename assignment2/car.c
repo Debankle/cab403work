@@ -120,20 +120,34 @@ car_shared_mem *mapSharedMemory(int fd) {
 }
 
 void elevator_loop(int pipe_write_fd) {
-    struct timespec timeout;
+    struct timespec timeout, current_time;
     int ret;
     calculate_absolute_timeout(&timeout);
 
     while (1) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
 
-        ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        if ((current_time.tv_sec > timeout.tv_sec) ||
+                (current_time.tv_sec == timeout.tv_sec && current_time.tv_nsec >= timeout.tv_nsec)) {
+                ret = ETIMEDOUT;
+        } else {
+            ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
+        }
 
         // if ref == ETIMEDOUT it means we reached delay
         // handle things as if the full delay time passed
         // otherwise its an interrupt and we need to check if its valid
 
         if (car_shm_ptr->emergency_mode == 1) {
+            if (ret == ETIMEDOUT) {
+                if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                    move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+                    
+                }
+            } else {
+
+            }
             if (strcmp(car_shm_ptr->status, "Closed") == 0) {
                 if (car_shm_ptr->open_button == 1) {
                     car_shm_ptr->open_button = 0;
@@ -386,7 +400,7 @@ void notify_status_change(int pipe_write_fd) {
 }
 
 void calculate_absolute_timeout(struct timespec *ts) {
-    clock_gettime(CLOCK_REALTIME, ts);
+    clock_gettime(CLOCK_MONOTONIC, ts);
 
     ts->tv_sec += delay / 1000;
     ts->tv_nsec += (delay % 1000) * 1000000L;
