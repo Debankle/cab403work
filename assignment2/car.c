@@ -364,8 +364,20 @@ void *controller_connection(void *args) {
     timer.tv_sec = 0;
     timer.tv_usec = delay * 1000;
 
+    char pending_destination[4] = "";
+
     while (1) {
         pthread_mutex_lock(&car_shm_ptr->mutex);
+
+        if (pending_destination[0] != '\0' && strcmp(car_shm_ptr->status, "Between") != 0) {
+            strcpy(car_shm_ptr->destination_floor, pending_destination);
+            pending_destination[0] = '\0';
+            pthread_cond_broadcast(&car_shm_ptr->cond);
+            send_status(sockfd);
+            timer.tv_sec = 0;
+            timer.tv_usec = delay * 1000;
+        }
+
         int individual_service_mode = car_shm_ptr->individual_service_mode;
         int emergency_mode = car_shm_ptr->emergency_mode;
 
@@ -463,17 +475,8 @@ void *controller_connection(void *args) {
                 pthread_mutex_lock(&car_shm_ptr->mutex);
                 int individual_service_mode = car_shm_ptr->individual_service_mode;
                 pthread_mutex_unlock(&car_shm_ptr->mutex); 
-            
                 if (individual_service_mode == 0) {
-                    char new_destination[4];
-                    sscanf(message+6, "%s", new_destination);
-                    pthread_mutex_lock(&car_shm_ptr->mutex);
-                    strcpy(car_shm_ptr->destination_floor, new_destination);
-                    pthread_cond_broadcast(&car_shm_ptr->cond);
-                    pthread_mutex_unlock(&car_shm_ptr->mutex);
-                    send_status(sockfd);
-                    timer.tv_sec = 0;
-                    timer.tv_usec = delay * 1000;
+                    sscanf(message+6, "%s", pending_destination);
                 }
             }
             free(message);
