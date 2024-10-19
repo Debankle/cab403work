@@ -123,9 +123,10 @@ void elevator_loop(int pipe_write_fd) {
     struct timespec timeout, current_time;
     int ret;
     calculate_absolute_timeout(&timeout);
+    pthread_mutex_lock(&car_shm_ptr->mutex);
 
     while (1) {
-        pthread_mutex_lock(&car_shm_ptr->mutex);
+        
 
         clock_gettime(CLOCK_MONOTONIC, &current_time);
         if ((current_time.tv_sec > timeout.tv_sec) ||
@@ -135,53 +136,197 @@ void elevator_loop(int pipe_write_fd) {
             ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
         }
 
-        // if ret == 0 it was an interupt, handle the interupt and change state as needed
-        // if it was timeout still need to check for button changes or floor changes
-        // and then handle that as if it was an interupt, and if not finish the delay
         if (car_shm_ptr->emergency_mode == 1) {
-            if (ret == ETIMEDOUT) {
-
-            } else if (ret == 0) {
-                if (car_shm_ptr->open_button == 1) {
-                    car_shm_ptr->open_button = 0;
-                    if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-                        strcpy(car_shm_ptr->status, "Opening");
-                        calculate_absolute_timeout(&timeout);
-                        notify_status_change(pipe_write_fd);
-                        pthread_cond_broadcast(&car_shm_ptr->cond);
-                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-                        calculate_absolute_timeout(&timeout);
-                    } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
-                        strcpy(car_shm_ptr->status, "Opening");
-                        calculate_absolute_timeout(&timeout);
-                        notify_status_change(pipe_write_fd);
-                        pthread_cond_broadcast(&car_shm_ptr->cond);
-                    }
-                } else if (car_shm_ptr->close_button == 1) {
+            if (ret == 0) {
+                if (car_shm_ptr->close_button == 1) {
                     car_shm_ptr->close_button = 0;
-                    if (strcmp(car_shm_ptr->status, "Opening") == 0) {
-
-                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-
+                    if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
                     }
+                } else if (car_shm_ptr->open_button == 1) {
+                    car_shm_ptr->open_button = 0;
+                    if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                }
+            } else if (ret == ETIMEDOUT) {
+                if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                    move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+                    strcpy(car_shm_ptr->destination_floor, car_shm_ptr->current_floor);
+                    strcpy(car_shm_ptr->status, "Closed");
+                    notify_status_change(pipe_write_fd);
+                    if (car_shm_ptr->open_button == 1) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    car_shm_ptr->open_button = 0;
+                    car_shm_ptr->close_button = 0;
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                    car_shm_ptr->open_button = 0;
+                    if (car_shm_ptr->close_button == 1) {
+                        strcpy(car_shm_ptr->status, "Closing");
+                        car_shm_ptr->close_button = 0;
+                    } else {
+                        strcpy(car_shm_ptr->status, "Open");
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                    car_shm_ptr->close_button = 0;
+                    if (car_shm_ptr->open_button == 1) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        car_shm_ptr->open_button = 0;
+                    } else {
+                        strcpy(car_shm_ptr->status, "Closed");
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                    car_shm_ptr->open_button = 0;
+                    if (car_shm_ptr->close_button == 1) {
+                        car_shm_ptr->close_button = 0;
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                    calculate_absolute_timeout(&timeout);
+                } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                    car_shm_ptr->close_button = 0;
+                    if (car_shm_ptr->open_button == 1) {
+                        car_shm_ptr->open_button = 0;
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                    calculate_absolute_timeout(&timeout);
                 }
             }
+
         } else if (car_shm_ptr->individual_service_mode == 1) {
-            if (ret == ETIMEDOUT) {
-                if (strcmp(car_shm_ptr->status, "Between") == 0) {
-                    strcpy(car_shm_ptr->status, "Closed");
-                    strcpy(car_shm_ptr->destination_floor, car_shm_ptr->current_floor);
+            if (ret == 0) {
+                if (car_shm_ptr->close_button == 1) {
+                    car_shm_ptr->close_button = 0;
+                    if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                } else if (car_shm_ptr->open_button == 1) {
+                    car_shm_ptr->open_button = 0;
+                    if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                } else if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
+                    if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Between");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
                 }
-            } else if (ret == 0) {
+            } else if (ret == ETIMEDOUT) {
+                if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                    move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+                    strcpy(car_shm_ptr->destination_floor, car_shm_ptr->current_floor);
+                    strcpy(car_shm_ptr->status, "Closed");
+                    notify_status_change(pipe_write_fd);
+                    if (car_shm_ptr->open_button == 1) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    car_shm_ptr->open_button = 0;
+                    car_shm_ptr->close_button = 0;
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                    car_shm_ptr->open_button = 0;
+                    if (car_shm_ptr->close_button == 1) {
+                        strcpy(car_shm_ptr->status, "Closing");
+                        car_shm_ptr->close_button = 0;
+                    } else {
+                        strcpy(car_shm_ptr->status, "Open");
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                    car_shm_ptr->close_button = 0;
+                    if (car_shm_ptr->open_button == 1) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        car_shm_ptr->open_button = 0;
+                    } else {
+                        strcpy(car_shm_ptr->status, "Closed");
+                    }
+                    calculate_absolute_timeout(&timeout);
+                    notify_status_change(pipe_write_fd);
+                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                    car_shm_ptr->open_button = 0;
+                    if (car_shm_ptr->close_button == 1) {
+                        car_shm_ptr->close_button = 0;
+                        strcpy(car_shm_ptr->status, "Closing");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                    calculate_absolute_timeout(&timeout);
+                } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                    car_shm_ptr->close_button = 0;
+                    if (car_shm_ptr->open_button == 1) {
+                        car_shm_ptr->open_button = 0;
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
+                        strcpy(car_shm_ptr->status, "Between");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                    calculate_absolute_timeout(&timeout);
+                }
+            }
+        } else {
+            if (ret == 0) {
                 if (car_shm_ptr->open_button == 1) {
                     car_shm_ptr->open_button = 0;
                     if (strcmp(car_shm_ptr->status, "Closed") == 0) {
-                        strcpy(car_shm_ptr->status, "Opening");
-                    } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-                        strcpy(car_shm_ptr->status, "Opening");
-                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
 
-                    } else {
+                    } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+
+                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
 
                     }
                 } else if (car_shm_ptr->close_button == 1) {
@@ -190,16 +335,32 @@ void elevator_loop(int pipe_write_fd) {
                 } else if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
 
                 }
-            }
-        } else {
-            if (ret == ETIMEDOUT) {
+            } else if (ret == ETIMEDOUT) {
+                if (strcmp(car_shm_ptr->status, "Between") == 0) {
+                    move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
+                    strcpy(car_shm_ptr->status, "Closed");
+                    if (strcmp(car_shm_ptr->status, ))
+                } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
 
-            } else if (ret == 0) {
+                } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
 
+                } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+
+                } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+
+                }
             }
         }
-        pthread_mutex_unlock(&car_shm_ptr->mutex);
+
+        // if ref == ETIMEDOUT it means we reached delay
+        // handle things as if the full delay time passed
+        // otherwise its an interrupt and we need to check if its valid
+
+        // handle state change/action stuff here
+
     }
+
+    pthread_mutex_unlock(&car_shm_ptr->mutex);
 }
  
 void *controller_connection(void *args) {
