@@ -352,15 +352,8 @@ void elevator_loop(int pipe_write_fd) {
             }
         }
 
-        // if ref == ETIMEDOUT it means we reached delay
-        // handle things as if the full delay time passed
-        // otherwise its an interrupt and we need to check if its valid
-
-        // handle state change/action stuff here
-
+        pthread_mutex_unlock(&car_shm_ptr->mutex);
     }
-
-    pthread_mutex_unlock(&car_shm_ptr->mutex);
 }
  
 void *controller_connection(void *args) {
