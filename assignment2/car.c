@@ -135,93 +135,73 @@ void elevator_loop(int pipe_write_fd) {
             ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
         }
 
-        // if ref == ETIMEDOUT it means we reached delay
-        // handle things as if the full delay time passed
-        // otherwise its an interrupt and we need to check if its valid
-
+        // if ret == 0 it was an interupt, handle the interupt and change state as needed
+        // if it was timeout still need to check for button changes or floor changes
+        // and then handle that as if it was an interupt, and if not finish the delay
         if (car_shm_ptr->emergency_mode == 1) {
             if (ret == ETIMEDOUT) {
-                if (strcmp(car_shm_ptr->status, "Between") == 0) {
-                    move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
-                    
-                }
-            } else {
 
-            }
-            if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+            } else if (ret == 0) {
                 if (car_shm_ptr->open_button == 1) {
                     car_shm_ptr->open_button = 0;
-                    strcpy(car_shm_ptr->status, "Opening");
-                    calculate_absolute_timeout(&timeout);
-                    notify_status_change(pipe_write_fd);
-                    pthread_cond_broadcast(&car_shm_ptr->cond);
-                }
-            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-                if (car_shm_ptr->close_button == 1) {
+                    if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        calculate_absolute_timeout(&timeout);
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+                        calculate_absolute_timeout(&timeout);
+                    } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                        calculate_absolute_timeout(&timeout);
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
+                    }
+                } else if (car_shm_ptr->close_button == 1) {
                     car_shm_ptr->close_button = 0;
-                    strcpy(car_shm_ptr->status, "Closing");
-                    calculate_absolute_timeout(&timeout);
-                    notify_status_change(pipe_write_fd);
-                    pthread_cond_broadcast(&car_shm_ptr->cond);
+                    if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+
+                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+
+                    }
                 }
-            } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
-                strcpy(car_shm_ptr->status, "Open");
-                calculate_absolute_timeout(&timeout);
-                notify_status_change(pipe_write_fd);
-                pthread_cond_broadcast(&car_shm_ptr->cond);
-            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-                strcpy(car_shm_ptr->status, "Closed");
-                calculate_absolute_timeout(&timeout);
-                notify_status_change(pipe_write_fd);
-                pthread_cond_broadcast(&car_shm_ptr->cond);
             }
-
-
         } else if (car_shm_ptr->individual_service_mode == 1) {
-            if (strcmp(car_shm_ptr->status, "Opening") == 0) {
-                strcpy(car_shm_ptr->status, "Open");
-                pthread_cond_broadcast(&car_shm_ptr->cond);
-            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-                strcpy(car_shm_ptr->status, "Closed");
-                pthread_cond_broadcast(&car_shm_ptr->cond);
-            } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
-                strcpy(car_shm_ptr->status, "Closed");
-                pthread_cond_broadcast(&car_shm_ptr->cond);
-            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-                
-            } else if(strcmp(car_shm_ptr->status, "Closed") == 0) {
-
-            }
-
-            
-        } else {
-            if (strcmp(car_shm_ptr->status, "Opening") == 0) {
-                strcpy(car_shm_ptr->status, "Open");
-                if (car_shm_ptr->open_button == 1) {
-                    car_shm_ptr->open_button = 0;
-                }
-            } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-                if (car_shm_ptr->open_button == 1) {
-                    strcpy(car_shm_ptr->status, "Opening");
-                    car_shm_ptr->open_button = 0;
-                } else {
+            if (ret == ETIMEDOUT) {
+                if (strcmp(car_shm_ptr->status, "Between") == 0) {
                     strcpy(car_shm_ptr->status, "Closed");
+                    strcpy(car_shm_ptr->destination_floor, car_shm_ptr->current_floor);
                 }
-            } else if (strcmp(car_shm_ptr->status, "Between") == 0) {
-                move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
-            } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
+            } else if (ret == 0) {
+                if (car_shm_ptr->open_button == 1) {
+                    car_shm_ptr->open_button = 0;
+                    if (strcmp(car_shm_ptr->status, "Closed") == 0) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                    } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
+                        strcpy(car_shm_ptr->status, "Opening");
+                    } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
 
-            } else if(strcmp(car_shm_ptr->status, "Closed") == 0) {
-                
+                    } else {
+
+                    }
+                } else if (car_shm_ptr->close_button == 1) {
+                    car_shm_ptr->close_button = 0;
+
+                } else if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
+
+                }
+            }
+        } else {
+            if (ret == ETIMEDOUT) {
+
+            } else if (ret == 0) {
+
             }
         }
-
         pthread_mutex_unlock(&car_shm_ptr->mutex);
     }
 }
-
-// TODO: handle controller disconnect, cleanup reloop etc
-// idk if thats necessary but w/e
+ 
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *)args;
     int sockfd = -1;
@@ -433,9 +413,12 @@ int floor_str_to_int(const char *floor_str) {
 }
 
 void floor_int_to_str(int floor_num, char *floor_str) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
     if (floor_num < 0) {
         snprintf(floor_str, 4, "B%d", -floor_num);
     } else {
         snprintf(floor_str, 4, "%d", floor_num);
     }
+#pragma GCC diagnostic pop
 }
