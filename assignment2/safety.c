@@ -1,109 +1,19 @@
-/**
-    Safety critical notes
-
-    dynamic memory: mmap, shm_open, strtol
-    variable length array: shm name
-    printf and fprintf: bad replace with write
-    errno: prohibited
-    getter and setter for shared memory
-    string functions: get rid of strncpy strcmp
-    infinite loop: can't do anything about that
-    magic numbers: properly define compare variables
-    get rid of boolean
-    single exit point, no exits called
-    consistent naming convention
-
+/** Safety Critical Notes
+ * 
+ * There are only two violations of the MISRA C safety critical requirements
+ * in this program. The rest have been replaced, with fixed length strings, 
+ * safe custom string functions, using byte restricted write functions.
+ * Additionally, magic numbers have been avoided with preprocessor defines
+ * and consistent naming conventions have been followed. There is no unreachable code
+ * and only one exit point in the program at a time. Proper control is taken when using 
+ * pthread and mutexs, and there are no other threads involved in this particular program.
+ * 
+ * The two violations are the use of the dynamic memory mapping of shared memory, as well
+ * as the infinite loop. Both of these are essential to the operation of the program and cannot be avoided.
+ * With respect to the memory mapping, proper error handling has been implemented to
+ * close the program should anything happen during initialisation. The while loop is intentionally
+ * infinite as this program should not end, and continue to run the same section.
  */
-
-/**
- * **Safety-Critical Notes and MISRA C Compliance Justifications**
- *
- * This program has been developed with adherence to MISRA C guidelines for safety-critical systems.
- * Below is a detailed explanation of the choices made, deviations from the standards, and justifications.
- *
- * **1. Use of Dynamic Memory Functions (`mmap`, `shm_open`):**
- *    - **Violation:** MISRA C Rule 21.3 prohibits the use of dynamic memory allocation functions due to unpredictability in resource-constrained environments.
- *    - **Justification:** The functions `mmap` and `shm_open` are essential for accessing shared memory segments in a POSIX-compliant system. Shared memory is required for inter-process communication in this application, and there are no safer standard alternatives that provide the same functionality.
- *    - **Action:** Documented as an acceptable deviation due to necessity.
- *
- * **2. Variable-Length Arrays:**
- *    - **Violation:** MISRA C Rule 18.8 prohibits the use of variable-length arrays.
- *    - **Resolution:** Replaced variable-length arrays with fixed-size arrays using defined constants such as `MAX_NAME_SIZE`. All string operations are bounded to prevent buffer overruns.
- *
- * **3. Use of Standard I/O Functions (`printf`, `fprintf`):**
- *    - **Violation:** MISRA C Rule 21.6 prohibits the use of input/output functions from `<stdio.h>`.
- *    - **Resolution:** Removed all instances of `printf` and `fprintf`. Replaced with the `write` system call, which writes directly to file descriptors and is acceptable under MISRA C. Ensured that all outputs are correctly formatted and that lengths are properly calculated to avoid overflows.
- *
- * **4. Use of `errno`:**
- *    - **Violation:** MISRA C Rule 21.6 prohibits the use of error handling functions from `<errno.h>`.
- *    - **Resolution:** Eliminated all references to `errno`. Modified code to check return values directly and handle errors without relying on `errno`.
- *
- * **5. Use of Standard String Functions (`strncpy`, `strcmp`, `strlen`):**
- *    - **Violation:** MISRA C Rule 21.6 discourages the use of certain standard library functions that may not guarantee safety.
- *    - **Resolution:** Replaced with custom implementations:
- *        - Implemented `safe_strncpy` to safely copy strings without overrunning buffers.
- *        - Implemented `safe_strcmp` to safely compare strings within defined bounds.
- *        - Ensured all string operations are bounded and handle null-termination properly.
- *
- * **6. Use of Boolean Types (`bool`, `true`, `false`):**
- *    - **Violation:** MISRA C Rule 6.3 (for C90) prohibits the use of `bool`, `true`, and `false`.
- *    - **Resolution:** Replaced `bool` with `uint8_t` and defined constants `BUTTON_PRESSED` and `BUTTON_NOT_PRESSED` to represent boolean values. This ensures consistency and compliance with MISRA C.
- *
- * **7. Multiple Exit Points and Use of `exit()`:**
- *    - **Violation:** MISRA C Rule 15.5 recommends that every function have a single point of exit at the end of the function. The use of `exit()` is discouraged as it causes abrupt termination.
- *    - **Resolution:** Removed all `exit()` calls. Introduced an `error_code` variable to track errors and ensure that `main` returns this code at the end. Restructured code to have a single exit point. Immediate returns are used where necessary, with justification.
- *
- * **8. Consistent Naming Conventions:**
- *    - **Violation:** MISRA C advises consistent naming conventions for readability and maintainability.
- *    - **Resolution:** Standardized naming conventions throughout the code:
- *        - Used `snake_case` for variables and functions.
- *        - Constants are in uppercase with underscores (e.g., `MAX_NAME_SIZE`).
- *        - Types are clearly defined and consistent.
- *
- * **9. Magic Numbers:**
- *    - **Violation:** MISRA C Rule 2.13 prohibits the use of magic numbers (unnamed numerical constants).
- *    - **Resolution:** Defined all magic numbers as constants or macros:
- *        - Defined sizes such as `MAX_NAME_SIZE`, `MAX_FLOOR_LENGTH`, and `MAX_STATUS_LENGTH`.
- *        - Defined status codes and button states as constants.
- *        - Eliminated all hard-coded numerical values in comparisons and array sizes.
- *
- * **10. Infinite Loop:**
- *     - **Violation:** Infinite loops can be problematic if not properly controlled.
- *     - **Justification:** The infinite loop is necessary for continuous monitoring of the safety system. It is an essential part of the system's functionality. Documented as an acceptable deviation with this justification.
- *
- * **11. Use of Dynamic Memory Function (`strtol`):**
- *     - **Violation:** Initially, `strtol` was used, which is prohibited under MISRA C Rule 21.6.
- *     - **Resolution:** Removed the use of `strtol`. Since floor numbers are limited and formatted in a specific way, implemented custom parsing within `validate_floor_input` to handle floor validation without dynamic memory allocation or prohibited functions.
- *
- * **12. Handling of Error Messages Including Car Name:**
- *     - **Challenge:** Including variable data (car name) in error messages without using prohibited functions like `sprintf`.
- *     - **Resolution:** Manually constructed error messages by copying strings and ensuring buffer sizes are respected. Used carefully controlled loops and boundary checks to prevent buffer overruns. This approach complies with MISRA C while meeting functional requirements.
- *
- * **13. Use of Fixed-Width Integer Types:**
- *     - **Compliance:** Used fixed-width integer types (`uint8_t`, `uint16_t`) for all integer variables to ensure consistent behavior across platforms and adherence to MISRA C guidelines.
- *
- * **14. Error Handling and Resource Management:**
- *     - **Compliance:** Ensured that all resources (e.g., shared memory descriptors) are properly managed and closed. Used error codes and consistent error handling mechanisms. Avoided abrupt terminations and ensured that the program exits gracefully.
- *
- * **15. Avoidance of Unnecessary Headers and Functions:**
- *     - **Resolution:** Removed unnecessary headers such as `<stdio.h>`, `<string.h>`, `<stdbool.h>`, and `<errno.h>` which contain prohibited functions or types. This reduces the risk of inadvertently using disallowed functions.
- *
- * **16. Thread Safety:**
- *     - **Compliance:** Properly used `pthread_mutex_lock` and `pthread_cond_wait` to ensure thread safety when accessing shared memory. Followed best practices for synchronization in a multi-threaded environment.
- *
- * **17. Boundary Checks and Buffer Safety:**
- *     - **Compliance:** All array and buffer accesses are bounded. Loops that access arrays check against the maximum allowed sizes. This prevents buffer overruns and enhances safety.
- *
- * **18. Justification for Acceptable Deviations:**
- *     - **Dynamic Memory Functions (`mmap`, `shm_open`):** Essential for functionality; no safer alternatives available.
- *     - **Infinite Loop:** Required for continuous operation of the safety system.
- *     - **Including Variable Data in Messages:** Necessary for user feedback; handled safely without prohibited functions.
- *
- * **Summary:**
- *
- * All identified MISRA C violations have been addressed either by making the necessary changes to comply with the guidelines or by documenting and justifying acceptable deviations where compliance is not possible due to functional requirements. The code has been thoroughly reviewed to ensure safety, reliability, and maintainability in a safety-critical context.
- */
-
 
 
 #include <stdlib.h>
@@ -121,7 +31,6 @@
 #define BUTTON_PRESSED 1U
 #define BUTTON_NOT_PRESSED 0U
 #define PREFIX_LENGTH 4U
-
 
 typedef struct {
     pthread_mutex_t mutex;
