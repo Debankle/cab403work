@@ -1,16 +1,16 @@
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <signal.h>
 #include <sys/time.h>
-#include <poll.h>
 #include <time.h>
-#include <pthread.h>
+#include <unistd.h>
 
 #include "shared.h"
 
@@ -83,12 +83,12 @@ int main(int argc, char **argv) {
         close(car_shm_fd);
         error("munmap()");
     }
-    
+
     if (close(car_shm_fd) == -1) {
         error("close()");
     }
 
-    if(shm_unlink(shm_name) == -1) {
+    if (shm_unlink(shm_name) == -1) {
         error("shm_unlink()");
     }
 
@@ -126,12 +126,10 @@ void elevator_loop(int pipe_write_fd) {
     pthread_mutex_lock(&car_shm_ptr->mutex);
 
     while (1) {
-        
-
         clock_gettime(CLOCK_MONOTONIC, &current_time);
         if ((current_time.tv_sec > timeout.tv_sec) ||
-                (current_time.tv_sec == timeout.tv_sec && current_time.tv_nsec >= timeout.tv_nsec)) {
-                ret = ETIMEDOUT;
+            (current_time.tv_sec == timeout.tv_sec && current_time.tv_nsec >= timeout.tv_nsec)) {
+            ret = ETIMEDOUT;
         } else {
             ret = pthread_cond_timedwait(&car_shm_ptr->cond, &car_shm_ptr->mutex, &timeout);
         }
@@ -323,17 +321,27 @@ void elevator_loop(int pipe_write_fd) {
                 if (car_shm_ptr->open_button == 1) {
                     car_shm_ptr->open_button = 0;
                     if (strcmp(car_shm_ptr->status, "Closed") == 0) {
-
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
                     } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-
+                        calculate_absolute_timeout(&timeout);
+                        strcpy(car_shm_ptr->status, "Opening");
+                        notify_status_change(pipe_write_fd);
+                        pthread_cond_broadcast(&car_shm_ptr->cond);
                     } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-
+                        calculate_absolute_timeout(&timeout);
                     }
                 } else if (car_shm_ptr->close_button == 1) {
                     car_shm_ptr->close_button = 0;
+                    if (strcmp(car_shm_ptr->status, "Open") == 0) {
+
+                    } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
+                        
+                    }
 
                 } else if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
-
                 }
             } else if (ret == ETIMEDOUT) {
                 if (strcmp(car_shm_ptr->status, "Between") == 0) {
@@ -341,13 +349,9 @@ void elevator_loop(int pipe_write_fd) {
                     strcpy(car_shm_ptr->status, "Closed");
                     if (strcmp(car_shm_ptr->status, ))
                 } else if (strcmp(car_shm_ptr->status, "Closed") == 0) {
-
                 } else if (strcmp(car_shm_ptr->status, "Opening") == 0) {
-
                 } else if (strcmp(car_shm_ptr->status, "Open") == 0) {
-
                 } else if (strcmp(car_shm_ptr->status, "Closing") == 0) {
-
                 }
             }
         }
@@ -355,7 +359,7 @@ void elevator_loop(int pipe_write_fd) {
         pthread_mutex_unlock(&car_shm_ptr->mutex);
     }
 }
- 
+
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *)args;
     int sockfd = -1;
@@ -442,7 +446,7 @@ void *controller_connection(void *args) {
             snprintf(initialMessage, sizeof(initialMessage), "CAR %s %s %s", conn_args->name, conn_args->lowest_floor, conn_args->highest_floor);
             send_message(sockfd, initialMessage);
             send_status(sockfd);
-            
+
             timer.tv_sec = 0;
             timer.tv_usec = delay * 1000;
         }
@@ -463,7 +467,7 @@ void *controller_connection(void *args) {
             perror("select()");
             break;
         }
-        
+
         if (FD_ISSET(sockfd, &readfds)) {
             char *message = receive_msg(sockfd);
             if (message == NULL) {
@@ -474,22 +478,22 @@ void *controller_connection(void *args) {
             if (strncmp(message, "FLOOR ", 6) == 0) {
                 pthread_mutex_lock(&car_shm_ptr->mutex);
                 int individual_service_mode = car_shm_ptr->individual_service_mode;
-                pthread_mutex_unlock(&car_shm_ptr->mutex); 
+                pthread_mutex_unlock(&car_shm_ptr->mutex);
                 if (individual_service_mode == 0) {
-                    sscanf(message+6, "%s", pending_destination);
+                    sscanf(message + 6, "%s", pending_destination);
                 }
             }
             free(message);
         }
 
         if (FD_ISSET(conn_args->pipe_read_fd, &readfds)) {
-                char buf[128];
-                read(conn_args->pipe_read_fd, buf, sizeof(buf));
-                send_status(sockfd);
-                timer.tv_sec = 0;
-                timer.tv_usec = delay * 1000;
+            char buf[128];
+            read(conn_args->pipe_read_fd, buf, sizeof(buf));
+            send_status(sockfd);
+            timer.tv_sec = 0;
+            timer.tv_usec = delay * 1000;
         }
-        
+
         if (res == 0) {
             send_status(sockfd);
             timer.tv_sec = 0;
@@ -563,7 +567,7 @@ void move_floor(char *current_floor, const char *destination_floor) {
 
 int floor_str_to_int(const char *floor_str) {
     if (floor_str[0] == 'B') {
-        return -atoi(floor_str+1);
+        return -atoi(floor_str + 1);
     } else {
         return atoi(floor_str);
     }
