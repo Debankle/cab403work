@@ -79,18 +79,21 @@ void send_message(int fd, const char *buf) {
 }
 
 // TODO: add handle received == 0 for disconnect
-void recv_looped(int fd, void *buf, size_t sz) {
+int recv_looped(int fd, void *buf, size_t sz) {
     char *ptr = (char *)buf;
     size_t remain = sz;
 
     while (remain > 0) {
         ssize_t received = read(fd, ptr, remain);
         if (received == -1) {
-            error("read()");
+            return -1;
+        } else if (received == 0) {
+            return -1;
         }
         ptr += received;
         remain -= received;
     }
+    return 0;
 }
 
 char *receive_msg(int fd) {
@@ -100,10 +103,13 @@ char *receive_msg(int fd) {
 
     char *buf = (char *)malloc(len + 1);
     if (buf == NULL) {
-        error("malloc()");
+        perror("malloc()");
     }
     buf[len] = '\0';
-    recv_looped(fd, buf, len);
+    if (recv_looped(fd, buf, len) == -1) {
+        free(buf);
+        return NULL;
+    }
     return buf;
 }
 
