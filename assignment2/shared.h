@@ -24,9 +24,18 @@ typedef struct {
     uint8_t emergency_mode;
 } car_shared_mem;
 
+/**
+ * Determine whether the floor string is a valid input. 
+ * Returns true if the floor is between B99 and B1 or 1 and 999
+ * 
+ * @param floor - floor to be validates 
+ * @return true - if the floor is withing the valid range
+ * @return false - if the floor is not within the valid range
+ */
 bool validate_floor_input(const char *floor) {
     size_t len = strlen(floor);
 
+    // Check bool is at least one char and at most %%%\0 length string
     if (len > 4 || len < 1) {
         return false;
     }
@@ -34,6 +43,7 @@ bool validate_floor_input(const char *floor) {
     char *endptr;
     long floor_number;
 
+    // If it is a basement safetly convert string +1 (number) to float to check if it is an integer
     if (floor[0] == 'B') {
         errno = 0;
         floor_number = strtol(floor + 1, &endptr, 10);
@@ -42,6 +52,7 @@ bool validate_floor_input(const char *floor) {
             return false;
         }
     } else {
+        // same check but do it with full string since not basement
         errno = 0;
         floor_number = strtol(floor, &endptr, 10);
 
@@ -53,11 +64,6 @@ bool validate_floor_input(const char *floor) {
     return true;
 }
 
-void error(const char *msg, ...) {
-    fprintf(stderr, "%s: %s\n", msg, strerror(errno));
-    exit(EXIT_FAILURE);
-}
-
 void send_looped(int fd, const void *buf, size_t sz) {
     const char *ptr = (const char *)buf;
     size_t remain = sz;
@@ -65,7 +71,8 @@ void send_looped(int fd, const void *buf, size_t sz) {
     while (remain > 0) {
         ssize_t sent = write(fd, ptr, remain);
         if (sent == -1) {
-            error("write()");
+            perror("write()");
+            exit(EXIT_FAILURE);
         }
         ptr += sent;
         remain -= sent;
@@ -78,7 +85,11 @@ void send_message(int fd, const char *buf) {
     send_looped(fd, buf, strlen(buf));
 }
 
-// TODO: add handle received == 0 for disconnect
+/**
+ * Receives a message from a socket fd, by checking the length is expected
+ * then writing it to the string pointer. Returns -1 on an error (incorrect length or no message)
+ * otherwise returns 1
+ */
 int recv_looped(int fd, void *buf, size_t sz) {
     char *ptr = (char *)buf;
     size_t remain = sz;
@@ -96,6 +107,13 @@ int recv_looped(int fd, void *buf, size_t sz) {
     return 0;
 }
 
+/**
+ * Receives a message from a specific socket fd. Gets the length of the message, and then reads that
+ * length in a loop until there is no message remaining. If the socket disconnects returns NULL,
+ * otherwise returns pointer to the string
+ * 
+ * Return pointer must be freed manually later
+ */
 char *receive_msg(int fd) {
     uint32_t nlen;
     recv_looped(fd, &nlen, sizeof(nlen));
@@ -113,6 +131,11 @@ char *receive_msg(int fd) {
     return buf;
 }
 
+/**
+ * Reset the shared memory object. Zeros the contents
+ * then sets the default status "Closed" and the current
+ * and destination floors to the floor param 
+ */
 void reset_shm(car_shared_mem *s, const char *floor)
 {
   pthread_mutex_lock(&s->mutex);
@@ -125,6 +148,11 @@ void reset_shm(car_shared_mem *s, const char *floor)
   pthread_mutex_unlock(&s->mutex);
 }
 
+/**
+ * Initialise a shared memory object s. Enable mutex and conditions
+ * to work on multiple threads, and then reset the shared memory
+ * to default conditions.
+ */
 void init_shm(car_shared_mem *s, const char *lowest_floor)
 {
   pthread_mutexattr_t mutattr;

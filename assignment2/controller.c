@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <poll.h>
+#include <limits.h>
 
 #include "shared.h"
 
@@ -27,6 +28,7 @@ typedef struct Car {
     char destination_floor[4];
     char status[8];
     FloorNode *floor_queue_head;
+    pthread_mutex_t data_mutex;
     pthread_mutex_t queue_mutex;
     struct Car *next;
 } Car;
@@ -44,10 +46,17 @@ typedef struct {
     pthread_mutex_t *connected_mutex;
 } MonitorArgs;
 
+typedef struct {
+    char direction;
+    FloorNode *start;
+    FloorNode *end;
+} QueueBlock;
+
 int sockfd;
 
 pthread_mutex_t car_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t call_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t call_queue_cond = PTHREAD_COND_INITIALIZER;
 
 Car *car_list_head = NULL;
 Call *call_queue_head = NULL;
@@ -60,6 +69,12 @@ void handle_call_connection(int conn_fd, char *initial_message);
 void elevator_control_loop(void);
 void sigint_handler(int s);
 void *monitor_socket(void *args);
+int floor_number(const char *floor);
+Car *select_best_car(Call *call);
+void insert_floors_into_queue(Car *car, Call *call, char call_direction);
+int can_access_floors(Car *car, char *current, char *destination);
+void free_floor_queue(FloorNode *head);
+int simulate_insertion(Car *car, Call *call, char call_direction);
 
 int main(void) {
 
@@ -76,28 +91,181 @@ int main(void) {
     return 0;
 }
 
-// send_message(int sockfd, const char *buf);
-
 void elevator_control_loop(void) {
-
-    pthread_mutex_lock(&call_queue_mutex);
-    Call *current_call_being_handled = call_queue_head;    
     pthread_mutex_lock(&call_queue_mutex);
 
     while (1) {
-        // Handle elevator logic later
-        // Send message; "FLOOR {floor}"
-        // send message; "CAR {car name}"
+        while (call_queue_head == NULL) {
+            pthread_cond_wait(&call_queue_cond, &call_queue_mutex);
+        }
+        
+        Call *current_call = call_queue_head;
+        call_queue_head = call_queue_head->next;
+        pthread_mutex_unlock(&call_queue_mutex);
 
-        pthread_mutex_lock(&call_queue_mutex);
-        current_call_being_handled = call_queue_head;
-        pthread_mutex_lock(&call_queue_mutex);
+        char *from_floor = current_call->current_floor;
+        char *to_floor = current_call->destination_floor;
+        char call_direction = (floor_number(to_floor) > floor_number(from_floor)) ? 'U' : 'D';
 
-        if (current_call_being_handled != NULL) {
-            
+        Car *selected_car = select_best_car(current_call);
+
+        if (selected_car != NULL) {
+            pthread_mutex_lock(&selected_car->queue_mutex);
+            insert_floors_into_queue(selected_car, current_call, call_direction);
+            pthread_mutex_unlock(&selected_car->queue_mutex);
+
+            char response[260];
+            snprintf(response, sizeof(response), "CAR %s", selected_car->name);
+            send_message(current_call->fd, response);
+            close(current_call->fd);
+        } else {
+            const char *response = "UNAVAILABLE";
+            send_message(current_call->fd, response);
+            close(current_call->fd);
         }
 
+        free(current_call);
+
+        pthread_mutex_lock(&call_queue_mutex);
     }
+
+    pthread_mutex_unlock(&call_queue_mutex);
+}
+
+Car *select_best_car(Call *call) {
+    pthread_mutex_lock(&car_list_mutex);
+    Car *current_car = car_list_head;
+
+    while (current_car != NULL) {
+        pthread_mutex_lock(&current_car->data_mutex);
+        if (can_access_floors(current_car, call->current_floor, call->destination_floor)) {
+            pthread_mutex_unlock(&current_car->data_mutex);
+            pthread_mutex_unlock(&car_list_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&current_car->data_mutex);
+        current_car = current_car->next;
+    }
+    
+    pthread_mutex_unlock(&car_list_mutex);
+    
+    return current_car;
+}
+
+void insert_floors_into_queue(Car *car, Call *call, char call_direction) {
+    pthread_mutex_lock(&car->data_mutex);
+
+    char prev_first_floor[4];
+    char car_direction;
+    int car_current_floor_num = floor_number(car->current_floor);
+    int car_destination_floor_num = floor_number(car->destination_floor);
+
+    if (car->floor_queue_head != NULL) {
+        strncpy(prev_first_floor, car->floor_queue_head->floor, sizeof(prev_first_floor));
+    } else {
+        prev_first_floor[0] = '\0';
+    }
+
+    if (strcmp(car->status, "Between") == 0) {
+        car_direction = (car_destination_floor_num > car_current_floor_num) ? 'U' : 'D';
+    } else if (car->floor_queue_head != NULL) {
+        int next_floor_num = floor_number(car->floor_queue_head->floor);
+        car_direction = (next_floor_num > car_current_floor_num) ? 'U' : 'D';
+    } else {
+        car_direction = call_direction;
+    }
+
+    FloorNode *from_node = malloc(sizeof(FloorNode));
+    from_node->direction = call_direction;
+    strcpy(from_node->floor, call->current_floor);
+    from_node->next = NULL;
+
+    FloorNode *to_node = malloc(sizeof(FloorNode));
+    to_node->direction = call_direction;
+    strcpy(to_node->floor, call->destination_floor);
+    to_node->next = NULL;
+
+    if (car_direction == call_direction) {
+        FloorNode *prev = NULL;
+        FloorNode *curr = car->floor_queue_head;
+        int from_inserted = 0;
+        int to_inserted = 0;
+
+        int from_floor_num = floor_number(call->current_floor);
+        int to_floor_num = floor_number(call->destination_floor);
+
+        while (curr != NULL && curr->direction == car_direction) {
+            int curr_floor_num = floor_number(curr->floor);
+
+            if (!from_inserted && ((car_direction == 'U' && curr_floor_num >= from_floor_num) ||
+                                   (car_direction == 'D' && curr_floor_num <= from_floor_num))) {
+                if (!(strcmp(curr->floor, call->current_floor) == 0 && curr->direction == call_direction)) {
+                    from_node->next = curr;
+                    if (prev != NULL) {
+                        prev->next = from_node;
+                    } else {
+                        car->floor_queue_head = from_node;
+                    }
+                    prev = from_node;
+                }
+                from_inserted = 1;                
+            }
+
+            if (from_inserted && !to_inserted && ((car_direction == 'U' && curr_floor_num >= to_floor_num) ||
+                                                  (car_direction == 'D' && curr_floor_num <= to_floor_num))) {
+                if (!(strcmp(curr->floor, call->destination_floor) == 0 && curr->direction == call_direction)) {
+                    to_node->next = curr;
+                    if (prev != NULL) {
+                        prev->next = to_node;
+                    } else {
+                        car->floor_queue_head = to_node;
+                    }
+                    prev = to_node;
+                }
+                to_inserted = 1;
+                break;
+            }
+
+            prev = curr;
+            curr = curr->next;            
+        }
+
+        if (!from_inserted) {
+            if (prev != NULL) {
+                prev->next = from_node;
+            } else {
+                car->floor_queue_head = from_node;
+            }
+            prev = from_node;
+        }
+        if (!to_inserted) {
+            from_node->next = to_node;
+            to_node->next = curr;
+        }
+    } else {
+        if (car->floor_queue_head == NULL) {
+            car->floor_queue_head = from_node;
+            from_node->next = to_node;
+        } else {
+            FloorNode *last = car->floor_queue_head;
+            while (last->next != NULL) {
+                last = last->next;
+            }
+            last->next = from_node;
+            from_node->next = to_node;
+        }
+    }
+
+    if (car->floor_queue_head != NULL) {
+        if ((strcmp(prev_first_floor, car->floor_queue_head->floor) != 0) || (strcmp(car->current_floor, car->floor_queue_head->floor) == 0)) {
+            // strncpy(car->destination_floor, car->floor_queue_head->floor, sizeof(car->destination_floor) - 1);
+            char message[10];
+            snprintf(message, sizeof(message), "FLOOR %s", car->floor_queue_head->floor);
+            send_message(car->fd, message);
+        }
+    }
+
+    pthread_mutex_unlock(&car->data_mutex);
 }
 
 void *controller_connection(void *args __attribute__((unused))) {
@@ -108,12 +276,14 @@ void *controller_connection(void *args __attribute__((unused))) {
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        error("socket()");
+        perror("socket()");
+        exit(EXIT_FAILURE);
     }
 
     int opt = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        error("setsockopt()");
+        perror("setsockopt()");
+        exit(EXIT_FAILURE);
     }
 
     memset(&controlleraddr, 0, sizeof(controlleraddr));
@@ -122,18 +292,21 @@ void *controller_connection(void *args __attribute__((unused))) {
     controlleraddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sockfd, (struct sockaddr *)&controlleraddr, sizeof(controlleraddr)) < 0) {
-        error("bind()");
+        perror("bind()");
+        exit(EXIT_FAILURE);
     }
 
     if (listen(sockfd, 50) < 0) {
-        error("listen()");
+        perror("listen()");
+        exit(EXIT_FAILURE);
     }
 
     while (1) {
         clilen = sizeof(conaddr);
         new_sock = accept(sockfd, (struct sockaddr *)&conaddr, &clilen);
         if (new_sock < 0) {
-            error("accept()");
+            perror("accept()");
+            exit(EXIT_FAILURE);
         }
 
         int *new_sock_ptr = malloc(sizeof(int));
@@ -173,8 +346,6 @@ void *handle_connection(void *args) {
 }
 
 void handle_call_connection(int conn_fd, char *initial_message) {
-    // fprintf(stdout, "%s\n", initial_message);
-    // fflush(stdout);
     char current_floor[4], destination_floor[4];
     if (sscanf(initial_message, "CALL %3s %3s",
                current_floor, destination_floor) != 2) {
@@ -205,6 +376,7 @@ void handle_call_connection(int conn_fd, char *initial_message) {
         }
         temp->next = new_call;
     }
+    pthread_cond_signal(&call_queue_cond);
     pthread_mutex_unlock(&call_queue_mutex);
 }
 
@@ -215,8 +387,6 @@ void handle_car_connection(int conn_fd, char *initial_message) {
         close(conn_fd);
         return;
     }
-    // fprintf(stdout, "%s\n", initial_message);
-    // fflush(stdout);
 
     char *status_update = receive_msg(conn_fd);
     if (status_update == NULL) {
@@ -231,7 +401,7 @@ void handle_car_connection(int conn_fd, char *initial_message) {
         free(status_update);
         return;
     }
-    // fprintf(stdout, "%s: %s\n", name, status_update);
+
     free(status_update);
 
     Car *new_car = malloc(sizeof(Car));
@@ -255,6 +425,7 @@ void handle_car_connection(int conn_fd, char *initial_message) {
     strncpy(new_car->status, status, sizeof(new_car->status) - 1);
     new_car->status[sizeof(new_car->status) - 1] = '\0';
     new_car->floor_queue_head = NULL;
+    pthread_mutex_init(&new_car->data_mutex, NULL);
     pthread_mutex_init(&new_car->queue_mutex, NULL);
     new_car->next = NULL;
 
@@ -288,7 +459,6 @@ void handle_car_connection(int conn_fd, char *initial_message) {
         pthread_mutex_lock(&connected_mutex);
         if (!connected) {
             pthread_mutex_unlock(&connected_mutex);
-            fprintf(stdout, "detected disconnected, breaking\n");
             break;
         }
         pthread_mutex_unlock(&connected_mutex);
@@ -303,23 +473,44 @@ void handle_car_connection(int conn_fd, char *initial_message) {
             break;
         }
 
-        // fprintf(stdout, "%s\n", status_update);
         if (sscanf(status_update, "STATUS %7s %3s %3s", status, current_floor, destination_floor) != 3) {
-            fprintf(stderr, "Not a status update, disconnecting: %s\n", status_update);
+            // fprintf(stderr, "Not a status update, disconnecting: %s\n", status_update);
             free(status_update);
             break;
         }
-        // fprintf(stdout, "%s: %s\n", name, status_update);
+        // fprintf(stdout, "%s: %s\n", new_car->name, status_update);
         free(status_update);
 
-        pthread_mutex_lock(&car_list_mutex);
+        pthread_mutex_lock(&new_car->data_mutex);
         strncpy(new_car->current_floor, current_floor, sizeof(new_car->current_floor) - 1);
         new_car->current_floor[sizeof(new_car->current_floor) - 1] = '\0';
         strncpy(new_car->destination_floor, destination_floor, sizeof(new_car->destination_floor) - 1);
         new_car->destination_floor[sizeof(new_car->destination_floor) - 1] = '\0';
         strncpy(new_car->status, status, sizeof(new_car->status) - 1);
         new_car->status[sizeof(new_car->status) - 1] = '\0';
-        pthread_mutex_unlock(&car_list_mutex);
+        pthread_mutex_unlock(&new_car->data_mutex);
+
+        pthread_mutex_lock(&new_car->queue_mutex);
+        if ((strcmp(new_car->status, "Opening") == 0) && (strcmp(new_car->current_floor, new_car->destination_floor) == 0)) {
+            if (new_car->floor_queue_head != NULL && (strcmp(new_car->floor_queue_head->floor, new_car->current_floor) == 0)) {
+                FloorNode *completed_floor = new_car->floor_queue_head;
+                new_car->floor_queue_head = new_car->floor_queue_head->next;
+                free(completed_floor);
+
+                if (new_car->floor_queue_head != NULL && strcmp(new_car->floor_queue_head->floor, new_car->current_floor) == 0) {
+                    completed_floor = new_car->floor_queue_head;
+                    new_car->floor_queue_head = new_car->floor_queue_head->next;
+                    free(completed_floor);
+                }
+                
+                if (new_car->floor_queue_head != NULL) {
+                    char message[10];
+                    snprintf(message, sizeof(message), "FLOOR %s", new_car->floor_queue_head->floor);
+                    send_message(new_car->fd, message);
+                }
+            }
+        }
+        pthread_mutex_unlock(&new_car->queue_mutex);
     }
 
     pthread_mutex_lock(&car_list_mutex);
@@ -343,10 +534,11 @@ void handle_car_connection(int conn_fd, char *initial_message) {
     }
     pthread_mutex_unlock(&connected_mutex);
 
+    pthread_mutex_destroy(&new_car->data_mutex);
+    pthread_mutex_destroy(&new_car->queue_mutex);
     pthread_mutex_destroy(&connected_mutex);
 
-    // fprintf(stdout, "Disconnected car\n");
-    // fflush(stdout);
+    free_floor_queue(new_car->floor_queue_head);
     free(new_car);
 }
 
@@ -415,18 +607,73 @@ void *monitor_socket(void *args) {
 }
 
 void sigint_handler(int s) {
-
     shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
 
     pthread_mutex_lock(&car_list_mutex);
     Car *current = car_list_head;
     while (current != NULL) {
+        Car *next = current->next;
+
         shutdown(current->fd, SHUT_RDWR);
         close(current->fd);
-        current = current->next;
+
+        pthread_mutex_lock(&current->queue_mutex);
+        free_floor_queue(current->floor_queue_head);
+        pthread_mutex_unlock(&current->queue_mutex);
+
+        pthread_mutex_destroy(&current->data_mutex);
+        pthread_mutex_destroy(&current->queue_mutex);
+
+        free(current);
+        current = next;
     }
+    car_list_head = NULL;
     pthread_mutex_unlock(&car_list_mutex);
+    pthread_mutex_destroy(&car_list_mutex);
+
+    pthread_mutex_lock(&call_queue_mutex);
+    Call *current_call = call_queue_head;
+    while (current_call != NULL) {
+        Call *next_call = current_call->next;
+
+        close(current_call->fd);
+        free(current_call);
+
+        current_call = next_call;
+    }
+    call_queue_head = NULL;
+    pthread_mutex_unlock(&call_queue_mutex);
+    pthread_mutex_destroy(&call_queue_mutex);
+
+    pthread_cond_destroy(&call_queue_cond);
 
     exit(s);
+}
+
+int floor_number(const char *floor_str) {
+    if (floor_str[0] == 'B') {
+        return -atoi(floor_str + 1);
+    } else {
+        return atoi(floor_str);
+    }
+}
+
+int can_access_floors(Car *car, char *current, char *destination) {
+    if (car == NULL) {
+        return 0;
+    }
+    int ret = (((floor_number(car->lowest_floor) <= floor_number(current)) && 
+                (floor_number(car->highest_floor) >= floor_number(current))) &&
+                (floor_number(car->lowest_floor) <= floor_number(destination)) && 
+                (floor_number(car->highest_floor) >= floor_number(destination))) ? 1 : 0;
+    return ret;
+}
+
+void free_floor_queue(FloorNode *head) {
+    while (head != NULL) {
+        FloorNode *temp = head;
+        head = head->next;
+        free(temp);
+    }
 }

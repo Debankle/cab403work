@@ -22,6 +22,12 @@ typedef struct {
     int pipe_write_fd;
 } controller_con_args_t;
 
+typedef struct {
+    int sockfd;
+    int *connection_alive;
+    pthread_mutex_t *connection_mutex;
+} monitor_args_t;
+
 int createSharedMemoryObject(char *name);
 car_shared_mem *mapSharedMemory(int fd);
 void elevator_loop(int pipe_write_fd);
@@ -33,6 +39,7 @@ void calculate_absolute_timeout(struct timespec *ts);
 int floor_str_to_int(const char *floor_str);
 void floor_int_to_str(int floor_num, char *floor_str);
 void move_floor(char *current_floor, const char *destination_floor);
+void *monitor_connection(void *args);
 
 static int delay;
 
@@ -53,7 +60,8 @@ int main(int argc, char **argv) {
 
     int pipefd[2];
     if (pipe(pipefd) == -1) {
-        error("pipe()");
+        perror("pipe()");
+        exit(EXIT_FAILURE);
     }
 
     size_t shm_name_size = strlen(argv[1]) + 5;
@@ -72,7 +80,8 @@ int main(int argc, char **argv) {
 
     pthread_t connection_thread;
     if (pthread_create(&connection_thread, NULL, controller_connection, &conn_args) != 0) {
-        error("pthread_create()");
+        perror("pthread_create()");
+        exit(EXIT_FAILURE);
     }
 
     elevator_loop(pipefd[1]);
@@ -80,16 +89,19 @@ int main(int argc, char **argv) {
     pthread_join(connection_thread, NULL);
 
     if (munmap(car_shm_ptr, sizeof(car_shared_mem)) == -1) {
+        perror("munmap()");
         close(car_shm_fd);
-        error("munmap()");
+        exit(EXIT_FAILURE);
     }
 
     if (close(car_shm_fd) == -1) {
-        error("close()");
+        perror("close()");
+        exit(EXIT_FAILURE);
     }
 
     if (shm_unlink(shm_name) == -1) {
-        error("shm_unlink()");
+        perror("shm_unlink()");
+        exit(EXIT_FAILURE);
     }
 
     return 0;
@@ -98,12 +110,14 @@ int main(int argc, char **argv) {
 int createSharedMemoryObject(char *name) {
     int fd = shm_open(name, O_CREAT | O_RDWR, 0666);
     if (fd == -1) {
-        error("shm_open()");
+        perror("shm_open()");
+        exit(EXIT_FAILURE);
     }
 
     if (ftruncate(fd, sizeof(car_shared_mem)) == -1) {
+        perror("ftruncate()");
         close(fd);
-        error("ftruncate()");
+        exit(EXIT_FAILURE);
     }
 
     return fd;
@@ -112,8 +126,9 @@ int createSharedMemoryObject(char *name) {
 car_shared_mem *mapSharedMemory(int fd) {
     car_shared_mem *shared_mem_ptr = (car_shared_mem *)mmap(NULL, sizeof(car_shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shared_mem_ptr == MAP_FAILED) {
+        perror("mmap()");
         close(fd);
-        error("mmap()");
+        exit(EXIT_FAILURE);
     }
 
     return shared_mem_ptr;
@@ -361,13 +376,6 @@ void elevator_loop(int pipe_write_fd) {
                 }
             } else if (ret == ETIMEDOUT) {
                 if (strcmp(car_shm_ptr->status, "Between") == 0) {
-                    // move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
-                    // if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) == 0) {
-                    //     strcpy(car_shm_ptr->status, "Opening");
-                    // }
-                    // notify_status_change(pipe_write_fd);
-                    // pthread_cond_broadcast(&car_shm_ptr->cond);
-                    // calculate_absolute_timeout(&timeout);
                     move_floor(car_shm_ptr->current_floor, car_shm_ptr->destination_floor);
                     strcpy(car_shm_ptr->status, "Closed");
                     if (strcmp(car_shm_ptr->current_floor, car_shm_ptr->destination_floor) != 0) {
@@ -455,33 +463,220 @@ void elevator_loop(int pipe_write_fd) {
 void *controller_connection(void *args) {
     controller_con_args_t *conn_args = (controller_con_args_t *) args;
     int sockfd = -1;
-
-    struct pollfd fds[2];
-    int timeout = delay;
+    int connected = 0;
 
     char pending_destination[4] = "";
-    int connected = 0;
 
     while (1) {
 
-        // try to connect every delay
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd == -1) {
+            perror("socket()");
+            usleep(delay * 1000);
+            continue;
+        }
+
+        struct sockaddr_in controller_addr;
+        memset(&controller_addr, 0, sizeof(controller_addr));
+        controller_addr.sin_family = AF_INET;
+        controller_addr.sin_port = htons(3000);
+        if (inet_pton(AF_INET, "127.0.0.1", &controller_addr.sin_addr) != 1) {
+            perror("inet_pton()");
+            close(sockfd);
+            sockfd = -1;
+            usleep(delay * 1000);
+            continue;
+        }
+
+        if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) != 0) {
+            // perror("connect()");
+            close(sockfd);
+            sockfd = -1;
+            usleep(delay * 1000);
+            continue;
+        }
+
+        connected = 1;
+
+        char initial_message[256];
+        snprintf(initial_message, sizeof(initial_message), "CAR %s %s %s", conn_args->name, conn_args->lowest_floor, conn_args->highest_floor);
+        send_message(sockfd, initial_message);
+        send_status(sockfd);
+
+        int connection_alive = 1;
+        pthread_mutex_t connection_mutex = PTHREAD_MUTEX_INITIALIZER;
+        pthread_t monitor_thread;
+
+        monitor_args_t *margs = malloc(sizeof(monitor_args_t));
+        if (margs == NULL) {
+            perror("malloc()");
+            close(sockfd);
+            sockfd = -1;
+            connected = 0;
+            continue;
+        }
+
+        margs->sockfd = sockfd;
+        margs->connection_alive = &connection_alive;
+        margs->connection_mutex = &connection_mutex;
+
+        if (pthread_create(&monitor_thread, NULL, monitor_connection, (void *)margs) != 0) {
+            perror("pthread_create()");
+            free(margs);
+            close(sockfd);
+            sockfd = -1;
+            connected = 0;
+            continue;
+        }
+
+        struct pollfd fds[2];
+        fds[0].fd = sockfd;
+        fds[0].events = POLLIN;
+        fds[1].fd = conn_args->pipe_read_fd;
+        fds[1].events = POLLIN;
+
+        int timeout = delay;
 
         while (connected) {
-            // update floor if needed - can be moved to check in the elevator_loop somehow
+            pthread_mutex_lock(&connection_mutex);
+            if (!connection_alive) {
+                pthread_mutex_unlock(&connection_mutex);
+                connected = 0;
+                break;
+            }
+            pthread_mutex_unlock(&connection_mutex);
 
-            // check mode change to disconnect
+            pthread_mutex_lock(&car_shm_ptr->mutex);
+            if (pending_destination[0] != '\0' && strcmp(car_shm_ptr->status, "Between") != 0) {
+                strcpy(car_shm_ptr->destination_floor, pending_destination);
+                pending_destination[0] = '\0';
+                pthread_cond_broadcast(&car_shm_ptr->cond);
+            }
 
-            // check socket closed to disconnect
+            int individual_service_mode = car_shm_ptr->individual_service_mode;
+            int emergency_mode = car_shm_ptr->emergency_mode;
 
-            // check which file descriptor to read
+            if (emergency_mode == 1) {
+                pthread_mutex_unlock(&car_shm_ptr->mutex);
+                send_message(sockfd, "EMERGENCY");
+                connected = 0;
+                break;
+            }
 
-            // update if pipe has byte
+            if (individual_service_mode == 1) {
+                pthread_mutex_unlock(&car_shm_ptr->mutex);
+                send_message(sockfd, "INDIVIDUAL SERVICE");
+                connected = 0;
+                break;
+            }
 
-            // read new floor change
+            pthread_mutex_unlock(&car_shm_ptr->mutex);
 
-            // check if needs to send delay timed update
+            int poll_res = poll(fds, 2, timeout);
+
+            if (poll_res == -1) {
+                perror("poll()");
+                connected = 0;
+                break;
+            }
+
+            if (poll_res == 0) {
+                send_status(sockfd);
+                timeout = delay;
+                continue;
+            }
+
+            if (fds[0].revents & POLLIN) {
+                char *message = receive_msg(sockfd);
+                if (message == NULL) {
+                    connected = 0;
+                    break;
+                }
+                if (strncmp(message, "FLOOR ", 6) == 0) {
+                    sscanf(message + 6, "%3s", pending_destination);
+                }
+                free(message);
+            }
+
+            if (fds[1].revents & POLLIN) {
+                char buf[1];
+                ssize_t bytes = read(conn_args->pipe_read_fd, buf, sizeof(buf));
+                if (bytes > 0) {
+                    send_status(sockfd);
+                    timeout = delay;
+                } else if (bytes == 0) {
+                    connected = 0;
+                    break;
+                } else {
+                    perror("read()");
+                    connected = 0;
+                    break;
+                }
+            }
+
+        }
+
+        pthread_mutex_lock(&connection_mutex);
+        connection_alive = 0;
+        pthread_mutex_unlock(&connection_mutex);
+
+        pthread_join(monitor_thread, NULL);
+
+        shutdown(sockfd, SHUT_RDWR);
+        close(sockfd);
+        sockfd = -1;
+        connected = 0;
+
+        pthread_mutex_destroy(&connection_mutex);
+    }
+
+    close(conn_args->pipe_read_fd);
+    free(conn_args);
+    return NULL;
+}
+
+void *monitor_connection(void *args) {
+    monitor_args_t *margs = (monitor_args_t *)args;
+    int sockfd = margs->sockfd;
+    int *connection_alive = margs->connection_alive;
+    pthread_mutex_t *connection_mutex = margs->connection_mutex;
+
+    struct pollfd pfd;
+    pfd.fd = sockfd;
+    pfd.events = POLLIN | POLLERR | POLLHUP;
+
+    while (1) {
+        int ret = poll(&pfd, 1, -1);
+        if (ret == -1) {
+            perror("poll()");
+            break;
+        }
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            pthread_mutex_lock(connection_mutex);
+            *connection_alive = 0;
+            pthread_mutex_unlock(connection_mutex);
+            break;
+        }
+        if (pfd.revents & POLLIN) {
+            char buf;
+            ssize_t res = recv(sockfd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (res == 0) {
+                pthread_mutex_lock(connection_mutex);
+                *connection_alive = 0;
+                pthread_mutex_unlock(connection_mutex);
+                break;
+            } else if (res < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    pthread_mutex_lock(connection_mutex);
+                    *connection_alive = 0;
+                    pthread_mutex_unlock(connection_mutex);
+                    break;
+                }
+            }
         }
     }
+    free(margs);
+    return NULL;
 }
 
 
@@ -628,8 +823,9 @@ void *controller_connection2(void *args) {
     }
 
     if (shutdown(sockfd, SHUT_RDWR) == -1) {
+        perror("shutdown()");
         close(sockfd);
-        error("shutdown()");
+        exit(EXIT_FAILURE);
     }
     close(sockfd);
     close(conn_args->pipe_read_fd);
@@ -645,15 +841,18 @@ void send_status(int sockfd) {
 
 void sigint_handler(int s) {
     if (munmap(car_shm_ptr, sizeof(car_shared_mem)) == -1) {
-        error("munmap()");
+        perror("munmap()");
+        exit(EXIT_FAILURE);
     }
 
     if (close(car_shm_fd) == -1) {
-        error("close()");
+        perror("close()");
+        exit(EXIT_FAILURE);
     }
 
     if (shm_unlink(shm_name) == -1) {
-        error("shm_unlink()");
+        perror("shm_unlink()");
+        exit(EXIT_FAILURE);
     }
 
     exit(s);
