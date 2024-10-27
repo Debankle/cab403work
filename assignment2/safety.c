@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 
+// Magic numbers for expected variables
 #define MAX_NAME_SIZE 256U
 #define MAX_ERROR_MSG_SIZE (MAX_NAME_SIZE + 25U)
 #define MAX_FLOOR_LENGTH 4U
@@ -32,6 +33,7 @@
 #define BUTTON_NOT_PRESSED 0U
 #define PREFIX_LENGTH 4U
 
+// Can't risk including shared.h so redefine those functions here
 typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -47,6 +49,7 @@ typedef struct {
     uint8_t emergency_mode;
 } car_shared_mem;
 
+// Modified from shared.h to not use any magic numbers or errno or strol
 uint8_t validate_floor_input(const char *floor) {
     uint8_t len = 0U;
     while (floor[len] != '\0' && len < MAX_FLOOR_LENGTH) {
@@ -74,6 +77,7 @@ uint8_t validate_floor_input(const char *floor) {
     return BUTTON_PRESSED;
 }
 
+// Validate the status of the car.
 uint8_t validate_status(const char *status) {
     const char valid_status[5][MAX_STATUS_LENGTH] = {
         "Opening",
@@ -86,10 +90,13 @@ uint8_t validate_status(const char *status) {
     uint8_t status_valid = BUTTON_NOT_PRESSED;
     uint8_t i, j, match;
 
+    // Iterate over each character of the status
     for (i = 0U; i < 5U; i++) {
         j = 0U;
         match = BUTTON_PRESSED;
 
+        // Check whether the character j is one of the strings. Don't need to check
+        // any specific status, just all of them each step until it ends
         while ((status[j] != '\0') && (valid_status[i][j] != '\0') && (j < MAX_STATUS_LENGTH)) {
             if (status[j] != valid_status[i][j]) {
                 match = BUTTON_NOT_PRESSED;
@@ -102,6 +109,7 @@ uint8_t validate_status(const char *status) {
             match = BUTTON_NOT_PRESSED;
         } 
 
+        // If it matches, break and return that it did
         if (match == BUTTON_PRESSED) {
             status_valid = BUTTON_PRESSED;
             break;
@@ -111,6 +119,8 @@ uint8_t validate_status(const char *status) {
     return status_valid;
 }
 
+// Safe version of strncpy, only goes to max lenght or until the source is \0
+// whichever comes first
 void safe_strncpy(char *dest, const char *src, uint8_t max_length) {
     uint8_t i = 0U;
     while ((src[i] != '\0') && (i < max_length - 1U)) {
@@ -120,6 +130,8 @@ void safe_strncpy(char *dest, const char *src, uint8_t max_length) {
     dest[i] = '\0';
 }
 
+// Safe version of strncmp, only goes until either string reaches \0 or until max length
+// whichever is first
 uint8_t safe_strcmp(const char *str1, const char *str2, uint8_t max_length) {
     uint8_t i = 0U;
 
@@ -138,13 +150,18 @@ uint8_t safe_strcmp(const char *str1, const char *str2, uint8_t max_length) {
 }
 
 int main(int argc, char **argv) {
+
+    // set variable for the single exit condition
     int error_code = EXIT_SUCCESS;
 
+    // ensure only two args passed
     if (argc != 2) {
         const char usage_msg[] = "Usage: ./safety {car name}.\n";
         write(STDOUT_FILENO, usage_msg, sizeof(usage_msg) - 1U);
         error_code = EXIT_FAILURE;
     } else {
+
+        // Create shared memory access string
         char name[MAX_NAME_SIZE] = "/car";
         uint8_t i = 0U;
         while (argv[1][i] != '\0' && (i + 4u) < MAX_NAME_SIZE) {
@@ -153,6 +170,7 @@ int main(int argc, char **argv) {
         }
         name [PREFIX_LENGTH + i] = '\0';
 
+        // open the shared memory, if it fails, write error message out
         int shm_fd = shm_open(name, O_RDWR, 0666);
         if (shm_fd == -1) {
             char error_msg[MAX_ERROR_MSG_SIZE];
@@ -179,6 +197,8 @@ int main(int argc, char **argv) {
             write(STDOUT_FILENO, error_msg, len);
             error_code = EXIT_FAILURE;
         } else {
+
+            // map shared memory object, if failed write error and then set exit code
             car_shared_mem *car_shm_ptr = (car_shared_mem *)mmap(NULL, sizeof(car_shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
             if (car_shm_ptr == MAP_FAILED) {
                 close(shm_fd);
@@ -186,26 +206,33 @@ int main(int argc, char **argv) {
                 write(STDERR_FILENO, mmap_error_msg, sizeof(mmap_error_msg) - 1U);
                 error_code = EXIT_FAILURE;
             } else {
+
+                // Infinite loop of access the shared memory object and check for valid statuses, wait for changes on condition
                 while (1U) {
                     pthread_mutex_lock(&car_shm_ptr->mutex);
                     pthread_cond_wait(&car_shm_ptr->cond, &car_shm_ptr->mutex);
 
+                    // check for door obstruction, if so change door to opening
                     if (car_shm_ptr->door_obstruction == 1 && (safe_strcmp(car_shm_ptr->status, "Closing", MAX_STATUS_LENGTH))) {
                         safe_strncpy(car_shm_ptr->status, "Opening", MAX_STATUS_LENGTH);
                     }
 
+                    // check for emergency stop just enabled, if so enable emergency mode
                     if (car_shm_ptr->emergency_stop == 1 && car_shm_ptr->emergency_mode == 0) {
                         const char error_msg[] = "The emergency stop button has been pressed!\n";
                         write(STDOUT_FILENO, error_msg, sizeof(error_msg) - 1U);
                         car_shm_ptr->emergency_mode = 1;
                     }
 
+                    // check if car is overloaded, if so enable emergency mode
                     if (car_shm_ptr->overload == 1 && car_shm_ptr->emergency_mode == 0) {
                         const char error_msg[] = "The overload sensor has been tripped!\n";
                         write(STDOUT_FILENO, error_msg, sizeof(error_msg) - 1U);
                         car_shm_ptr->emergency_mode = 1;
                     }
 
+                    // check for any invalid combination of properties, invalid floors, over 1 numbers
+                    // If so enable emergency mode
                     if (car_shm_ptr->emergency_mode != 1 && 
                         (!validate_floor_input(car_shm_ptr->current_floor) || 
                         !validate_floor_input(car_shm_ptr->destination_floor) || 
@@ -222,10 +249,11 @@ int main(int argc, char **argv) {
                         car_shm_ptr->emergency_mode = 1;
                     }
 
-
+                    /// Unlock the mutex and loop
                     pthread_mutex_unlock(&car_shm_ptr->mutex);
                 }
 
+                // no escape condition, so not expected to get here, but clean upshared memory and quit
                 if (munmap(car_shm_ptr, sizeof(car_shared_mem)) == -1) {
                     close(shm_fd);
                     const char munmap_error_msg[] = "munmap()\n";
@@ -242,5 +270,6 @@ int main(int argc, char **argv) {
         }
     }
 
+    // single exit point with the state determined throug the program
     return error_code;
 }

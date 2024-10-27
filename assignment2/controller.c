@@ -13,12 +13,17 @@
 
 #include "shared.h"
 
+// Linked list of floor queue nodes
 typedef struct FloorNode {
     char direction;
     char floor[4];
     struct FloorNode *next;
 } FloorNode;
 
+// details for each car in linked list
+// connected to each car, and each has
+// a destination linked list that they
+// move to 
 typedef struct Car {
     int fd;
     char name[256];
@@ -33,6 +38,7 @@ typedef struct Car {
     struct Car *next;
 } Car;
 
+// linked list of calls to handle in order
 typedef struct Call {
     char current_floor[4];
     char destination_floor[4];
@@ -40,28 +46,35 @@ typedef struct Call {
     struct Call *next;
 } Call;
 
+// track status of car connection to clean up on disconnect
 typedef struct {
     int conn_fd;
     int *connected;
     pthread_mutex_t *connected_mutex;
 } MonitorArgs;
 
+// check how the queue for a car works into three direction blocks
 typedef struct {
     char direction;
     FloorNode *start;
     FloorNode *end;
 } QueueBlock;
 
+// readonly main listen socket
 int sockfd;
 
+// initialise mutex so the linked lists can't be broken
 pthread_mutex_t car_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t call_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// update a call has been added so it should be handled
 pthread_cond_t call_queue_cond = PTHREAD_COND_INITIALIZER;
 
+// linked list head pointers
 Car *car_list_head = NULL;
 Call *call_queue_head = NULL;
 
-
+// Prototype declarations
 void *controller_connection(void *args);
 void *handle_connection(void *args);
 void handle_car_connection(int conn_fd, char *initial_message);
@@ -78,12 +91,15 @@ int simulate_insertion(Car *car, Call *call, char call_direction);
 
 int main(void) {
 
+    // handle singal interupts
     signal(SIGINT, sigint_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    // spawn socket listen thread
     pthread_t controller_thread;
     pthread_create(&controller_thread, NULL, controller_connection, NULL);
 
+    // go to handle any calls added
     elevator_control_loop();
 
     pthread_join(controller_thread, NULL);
@@ -99,16 +115,22 @@ void elevator_control_loop(void) {
             pthread_cond_wait(&call_queue_cond, &call_queue_mutex);
         }
         
+        // get the oldest call, head of list
+        // move next call to the head
         Call *current_call = call_queue_head;
         call_queue_head = call_queue_head->next;
         pthread_mutex_unlock(&call_queue_mutex);
 
+        // get direction call wants to move, up U or down D
         char *from_floor = current_call->current_floor;
         char *to_floor = current_call->destination_floor;
         char call_direction = (floor_number(to_floor) > floor_number(from_floor)) ? 'U' : 'D';
 
+        // pick the best car (didn't implement algorithm, just gets first car in linked list that reaches both floors)
         Car *selected_car = select_best_car(current_call);
 
+        // if car is found add the floors into queue
+        // otherwise send back unavailable
         if (selected_car != NULL) {
             pthread_mutex_lock(&selected_car->queue_mutex);
             insert_floors_into_queue(selected_car, current_call, call_direction);
@@ -124,6 +146,7 @@ void elevator_control_loop(void) {
             close(current_call->fd);
         }
 
+        // clean up handled call, doesn't need to be here anymore
         free(current_call);
 
         pthread_mutex_lock(&call_queue_mutex);
@@ -132,6 +155,10 @@ void elevator_control_loop(void) {
     pthread_mutex_unlock(&call_queue_mutex);
 }
 
+// iterate over each car in the linked list
+// until the first car that has a top and bottom limit that current and destination
+// of call can fit inside, assumes that one, no clever algorithm
+// either returns that car, or NULL if there are none
 Car *select_best_car(Call *call) {
     pthread_mutex_lock(&car_list_mutex);
     Car *current_car = car_list_head;
@@ -268,24 +295,29 @@ void insert_floors_into_queue(Car *car, Call *call, char call_direction) {
     pthread_mutex_unlock(&car->data_mutex);
 }
 
+// handles controller connection
+// implements socket then spawns sub threads to handle each connection
 void *controller_connection(void *args __attribute__((unused))) {
     int new_sock;
     struct sockaddr_in controlleraddr, conaddr;
     socklen_t clilen;
     pthread_t tid;
 
+    // make a socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket()");
         exit(EXIT_FAILURE);
     }
 
+    // make socket reusable
     int opt = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt()");
         exit(EXIT_FAILURE);
     }
 
+    // bind params to socket and sock address
     memset(&controlleraddr, 0, sizeof(controlleraddr));
     controlleraddr.sin_family = AF_INET;
     controlleraddr.sin_port = htons(3000);
@@ -296,11 +328,13 @@ void *controller_connection(void *args __attribute__((unused))) {
         exit(EXIT_FAILURE);
     }
 
+    // listen for connections
     if (listen(sockfd, 50) < 0) {
         perror("listen()");
         exit(EXIT_FAILURE);
     }
 
+    // if a connection is found make a new thread to handle the new connection
     while (1) {
         clilen = sizeof(conaddr);
         new_sock = accept(sockfd, (struct sockaddr *)&conaddr, &clilen);
@@ -320,11 +354,14 @@ void *controller_connection(void *args __attribute__((unused))) {
         
     }
 
+    // clean up socket
     shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
     return NULL;
 }
 
+// handle a connection
+// detach thread so its independent, determine what kind of connection and then make specific thread
 void *handle_connection(void *args) {
     int conn_fd = *((int *) args);
     free(args);
@@ -345,6 +382,9 @@ void *handle_connection(void *args) {
     return NULL;
 }
 
+// handle call connection
+// makes new Call node and adds to linked list
+// once added, clean up and return
 void handle_call_connection(int conn_fd, char *initial_message) {
     char current_floor[4], destination_floor[4];
     if (sscanf(initial_message, "CALL %3s %3s",
